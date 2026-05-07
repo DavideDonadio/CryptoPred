@@ -2,6 +2,7 @@ import pandas as pd
 import re
 import pickle
 import ccxt
+import numpy as np
 
 def clean_reddit_text(text):
     if not isinstance(text, str):
@@ -78,18 +79,18 @@ def generate_financial_columns(group):
 
     return pd.Series({
         "total_post_count": post_count,
-        "btc_bullish_count": bullish_btc,
-        "eth_bullish_count": bullish_eth,
-        "sol_bullish_count": bullish_sol,
-        "gen_bullish_count": bullish_gen,
-        "btc_bearish_count": bearish_btc,
-        "eth_bearish_count": bearish_eth,
-        "sol_bearish_count": bearish_sol,
-        "gen_bearish_count": bearish_gen,
-        "btc_neutral_count": neutral_btc,
-        "eth_neutral_count": neutral_eth,
-        "sol_neutral_count": neutral_sol,
-        "gen_neutral_count": neutral_gen,
+        "btc_bullish_ratio": bullish_btc / post_count if post_count else 0,
+        "eth_bullish_ratio": bullish_eth / post_count if post_count else 0,
+        "sol_bullish_ratio": bullish_sol / post_count if post_count else 0,
+        "gen_bullish_ratio": bullish_gen / post_count if post_count else 0,
+        "btc_bearish_ratio": bearish_btc / post_count if post_count else 0,
+        "eth_bearish_ratio": bearish_eth / post_count if post_count else 0,
+        "sol_bearish_ratio": bearish_sol / post_count if post_count else 0,
+        "gen_bearish_ratio": bearish_gen / post_count if post_count else 0,
+        "btc_neutral_ratio": neutral_btc / post_count if post_count else 0,
+        "eth_neutral_ratio": neutral_eth / post_count if post_count else 0,
+        "sol_neutral_ratio": neutral_sol / post_count if post_count else 0,
+        "gen_neutral_ratio": neutral_gen / post_count if post_count else 0,
         "btc_sentiment_score": (bullish_btc - bearish_btc) / btc_count if btc_count else 0,
         "eth_sentiment_score": (bullish_eth - bearish_eth) / eth_count if eth_count else 0,
         "sol_sentiment_score": (bullish_sol - bearish_sol) / sol_count if sol_count else 0,
@@ -152,6 +153,23 @@ def clean_dataset(df_btc, df_eth, df_sol) -> None:
     df_final["sol_delta_sentiment"] = df_final["sol_sentiment_score"].diff().fillna(0)
     df_final["gen_delta_sentiment"] = df_final["gen_sentiment_score"].diff().fillna(0)
     df_final = df_final.join([df_btc, df_eth, df_sol], how="inner")
+    
+    train_size = int(len(df_final) * 0.7)
+    train_df = df_final.iloc[:train_size].copy()
+
+    _, bins = pd.qcut(train_df['BTC-USD_volatility'], q=3, retbins=True)
+
+    bins[0] = -np.inf
+    bins[-1] = np.inf
+
+    df_final['BTC_vol_target'] = pd.cut(df_final['BTC-USD_volatility'], bins=bins, labels=[0, 1, 2])
+    df_final['SOL_vol_target'] = pd.cut(df_final['SOL-USD_volatility'], bins=bins, labels=[0, 1, 2])
+    df_final['ETH_vol_target'] = pd.cut(df_final['ETH-USD_volatility'], bins=bins, labels=[0, 1, 2])
+
+    df_final['BTC_vol_target'] = df_final['BTC_vol_target'].shift(-1)
+    df_final['SOL_vol_target'] = df_final['SOL_vol_target'].shift(-1)
+    df_final['ETH_vol_target'] = df_final['ETH_vol_target'].shift(-1)
+    df_final = df_final.dropna(subset=['BTC_vol_target', 'SOL_vol_target', 'ETH_vol_target'])
     df_final = df_final.reset_index()
       
     df_final.to_csv("data/clean_reddit/final_submission_clean.csv", index=False)
@@ -168,3 +186,4 @@ if __name__ == "__main__":
 
     clean_dataset(btc, eth, sol)
     
+
