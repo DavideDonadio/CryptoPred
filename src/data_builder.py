@@ -19,8 +19,9 @@ def prepare_market_data(df, ticker):
     
     df[f"{ticker}_return"] = df[f"{ticker}_close"].pct_change()
     df[f"{ticker}_volatility"] = (df["High"] - df["Low"]) / df["Open"]
+    df[f"{ticker}_vol_log"] = np.log1p(df[f"{ticker}_volume"])
     
-    return df[[f"{ticker}_close", f"{ticker}_volume", f"{ticker}_return", f"{ticker}_volatility"]]
+    return df[[f"{ticker}_close", f"{ticker}_return", f"{ticker}_volatility", f"{ticker}_vol_log"]]
 
 def fetch_ccxt(symbol, start_str, end_str, timeframe='1h'):
 
@@ -62,45 +63,35 @@ def generate_financial_columns(group):
     gen_count = group["sentiment_gen"].notna().sum()
     bullish_btc = (group["sentiment_btc"] == 2).sum()
     bearish_btc = (group["sentiment_btc"] == 0).sum()
-    neutral_btc = (group["sentiment_btc"] == 1).sum()   
     bullish_eth = (group["sentiment_eth"] == 2).sum()
     bearish_eth = (group["sentiment_eth"] == 0).sum()
-    neutral_eth = (group["sentiment_eth"] == 1).sum()
     bullish_sol = (group["sentiment_sol"] == 2).sum()
     bearish_sol = (group["sentiment_sol"] == 0).sum()
-    neutral_sol = (group["sentiment_sol"] == 1).sum()
     bullish_gen = (group["sentiment_gen"] == 2).sum()
     bearish_gen = (group["sentiment_gen"] == 0).sum()
-    neutral_gen = (group["sentiment_gen"] == 1).sum()
-    neutral_btc = (group["sentiment_btc"] == 1).sum()   
-    neutral_eth = (group["sentiment_eth"] == 1).sum()
-    neutral_sol = (group["sentiment_sol"] == 1).sum()
-    neutral_gen = (group["sentiment_gen"] == 1).sum()
 
     return pd.Series({
         "total_post_count": post_count,
-        "btc_bullish_ratio": bullish_btc / post_count if post_count else 0,
-        "eth_bullish_ratio": bullish_eth / post_count if post_count else 0,
-        "sol_bullish_ratio": bullish_sol / post_count if post_count else 0,
-        "gen_bullish_ratio": bullish_gen / post_count if post_count else 0,
-        "btc_bearish_ratio": bearish_btc / post_count if post_count else 0,
-        "eth_bearish_ratio": bearish_eth / post_count if post_count else 0,
-        "sol_bearish_ratio": bearish_sol / post_count if post_count else 0,
-        "gen_bearish_ratio": bearish_gen / post_count if post_count else 0,
-        "btc_neutral_ratio": neutral_btc / post_count if post_count else 0,
-        "eth_neutral_ratio": neutral_eth / post_count if post_count else 0,
-        "sol_neutral_ratio": neutral_sol / post_count if post_count else 0,
-        "gen_neutral_ratio": neutral_gen / post_count if post_count else 0,
-        "btc_sentiment_score": (bullish_btc - bearish_btc) / btc_count if btc_count else 0,
-        "eth_sentiment_score": (bullish_eth - bearish_eth) / eth_count if eth_count else 0,
-        "sol_sentiment_score": (bullish_sol - bearish_sol) / sol_count if sol_count else 0,
-        "gen_sentiment_score": (bullish_gen - bearish_gen) / gen_count if gen_count else 0
+        "BTC_bullish_ratio": bullish_btc / post_count if post_count else 0,
+        "ETH_bullish_ratio": bullish_eth / post_count if post_count else 0,
+        "SOL_bullish_ratio": bullish_sol / post_count if post_count else 0,
+        "GEN_bullish_ratio": bullish_gen / post_count if post_count else 0,
+        "BTC_bearish_ratio": bearish_btc / post_count if post_count else 0,
+        "ETH_bearish_ratio": bearish_eth / post_count if post_count else 0,
+        "SOL_bearish_ratio": bearish_sol / post_count if post_count else 0,
+        "GEN_bearish_ratio": bearish_gen / post_count if post_count else 0,
+        "BTC_sentiment_score": (bullish_btc - bearish_btc) / btc_count if btc_count else 0,
+        "ETH_sentiment_score": (bullish_eth - bearish_eth) / eth_count if eth_count else 0,
+        "SOL_sentiment_score": (bullish_sol - bearish_sol) / sol_count if sol_count else 0,
+        "GEN_sentiment_score": (bullish_gen - bearish_gen) / gen_count if gen_count else 0
     })
     
 
 def clean_dataset(df_btc, df_eth, df_sol) -> None:
     
     datasets = ["bitcoin", "cryptocurrency", "cryptocurrencies", "crypto_currency_news", "ethereum", "solana"]
+    prefixes = ['BTC', 'ETH', 'SOL', 'GEN']
+    tickers = ['BTC-USD', 'ETH-USD', 'SOL-USD']
     all_dfs = []
     svm_model = pickle.load(open("data/models/svm.pkl", "rb"))
     for dataset in datasets:
@@ -148,11 +139,33 @@ def clean_dataset(df_btc, df_eth, df_sol) -> None:
     df_final = df_final.set_index("created").sort_index()
 
     df_final = df_final.resample("60min").apply(generate_financial_columns)
-    df_final["btc_delta_sentiment"] = df_final["btc_sentiment_score"].diff().fillna(0)
-    df_final["eth_delta_sentiment"] = df_final["eth_sentiment_score"].diff().fillna(0)
-    df_final["sol_delta_sentiment"] = df_final["sol_sentiment_score"].diff().fillna(0)
-    df_final["gen_delta_sentiment"] = df_final["gen_sentiment_score"].diff().fillna(0)
+    df_final["BTC_delta_sentiment"] = df_final["BTC_sentiment_score"].diff().fillna(0)
+    df_final["ETH_delta_sentiment"] = df_final["ETH_sentiment_score"].diff().fillna(0)
+    df_final["SOL_delta_sentiment"] = df_final["SOL_sentiment_score"].diff().fillna(0)
+    df_final["GEN_delta_sentiment"] = df_final["GEN_sentiment_score"].diff().fillna(0)
     df_final = df_final.join([df_btc, df_eth, df_sol], how="inner")
+    
+    df_final['hour_of_day'] = df_final.index.hour
+    df_final['day_of_week'] = df_final.index.dayofweek
+    
+    for p in prefixes:
+        df_final[f'{p}_polarity'] = df_final[f'{p}_bullish_ratio'] - df_final[f'{p}_bearish_ratio']
+        
+    features_to_lag = []
+    
+    for p in prefixes:
+        features_to_lag.append(f'{p}_polarity')
+        features_to_lag.append(f'{p}_delta_sentiment')
+
+    for t in tickers:
+        features_to_lag.append(f'{t}_return')
+        features_to_lag.append(f'{t}_volatility')
+        features_to_lag.append(f'{t}_vol_log')
+        
+    for col in features_to_lag:
+        df_final[f'{col}_lag_1'] = df_final[col].shift(1)
+        
+    df_final.drop(columns=[f'{p}_polarity' for p in prefixes], inplace=True)
     
     train_size = int(len(df_final) * 0.7)
     train_df = df_final.iloc[:train_size].copy()
