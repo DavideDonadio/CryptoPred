@@ -182,7 +182,9 @@ def clean_dataset(df_btc, df_eth, df_sol) -> None:
     df_final['BTC_vol_target'] = df_final['BTC_vol_target'].shift(-1)
     df_final['SOL_vol_target'] = df_final['SOL_vol_target'].shift(-1)
     df_final['ETH_vol_target'] = df_final['ETH_vol_target'].shift(-1)
-    df_final = df_final.dropna(subset=['BTC_vol_target', 'SOL_vol_target', 'ETH_vol_target'])
+    
+    lag_cols = [f'{col}_lag_1' for col in features_to_lag]
+    df_final = df_final.dropna(subset=['BTC_vol_target', 'SOL_vol_target', 'ETH_vol_target'] + lag_cols)
     df_final = df_final.reset_index()
       
     df_final.to_csv("data/clean_reddit/final_submission_clean.csv", index=False)

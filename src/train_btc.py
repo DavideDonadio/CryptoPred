@@ -2,8 +2,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import lightgbm as lgb
-import xgboost as xgb
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import classification_report
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.utils.class_weight import compute_sample_weight
@@ -56,14 +55,14 @@ def main():
         "BTC-USD_close", "ETH-USD_close", "SOL-USD_close"
     ]
     x = df.drop(columns=to_drop_cols)
+    
+    print(x.isnull().sum()[x.isnull().sum() > 0])
 
     tss = TimeSeriesSplit(n_splits=5)
 
-    model_xgb = xgb.XGBClassifier(
-        objective="multi:softprob",
+    model_xgb = GradientBoostingClassifier(
         max_depth=5,
         random_state=42,
-        eval_metric="logloss",
     )
     model_rf = RandomForestClassifier(
         n_estimators=100,
