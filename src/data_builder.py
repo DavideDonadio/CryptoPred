@@ -83,7 +83,11 @@ def generate_financial_columns(group):
         "BTC_sentiment_score": (bullish_btc - bearish_btc) / btc_count if btc_count else 0,
         "ETH_sentiment_score": (bullish_eth - bearish_eth) / eth_count if eth_count else 0,
         "SOL_sentiment_score": (bullish_sol - bearish_sol) / sol_count if sol_count else 0,
-        "GEN_sentiment_score": (bullish_gen - bearish_gen) / gen_count if gen_count else 0
+        "GEN_sentiment_score": (bullish_gen - bearish_gen) / gen_count if gen_count else 0,
+        "BTC_weighted_sentiment": ((bullish_btc - bearish_btc) / btc_count) * post_count if btc_count else 0,
+        "ETH_weighted_sentiment": ((bullish_eth - bearish_eth) / eth_count) * post_count if eth_count else 0,
+        "SOL_weighted_sentiment": ((bullish_sol - bearish_sol) / sol_count) * post_count if sol_count else 0,
+        "GEN_weighted_sentiment": ((bullish_gen - bearish_gen) / gen_count) * post_count if gen_count else 0
     })
     
 
@@ -164,6 +168,9 @@ def clean_dataset(df_btc, df_eth, df_sol) -> None:
         
     for col in features_to_lag:
         df_final[f'{col}_lag_1'] = df_final[col].shift(1)
+        df_final[f'{col}_lag_3'] = df_final[col].shift(3)
+        df_final[f'{col}_lag_6'] = df_final[col].shift(6)
+        df_final[f'{col}_lag_12'] = df_final[col].shift(12)
         
     df_final.drop(columns=[f'{p}_polarity' for p in prefixes], inplace=True)
     
@@ -183,8 +190,11 @@ def clean_dataset(df_btc, df_eth, df_sol) -> None:
     df_final['SOL_vol_target'] = df_final['SOL_vol_target'].shift(-1)
     df_final['ETH_vol_target'] = df_final['ETH_vol_target'].shift(-1)
     
-    lag_cols = [f'{col}_lag_1' for col in features_to_lag]
-    df_final = df_final.dropna(subset=['BTC_vol_target', 'SOL_vol_target', 'ETH_vol_target'] + lag_cols)
+    df_final['post_volume_24h_avg'] = df_final['total_post_count'].rolling(window=24).mean()
+    df_final['post_spike_ratio'] = df_final['total_post_count'] / (df_final['post_volume_24h_avg'] + 1)
+    
+    lag_cols = [f'{col}_lag_{lag}' for col in features_to_lag for lag in [1, 3, 6, 12]]
+    df_final = df_final.dropna(subset=['BTC_vol_target', 'SOL_vol_target', 'ETH_vol_target', 'post_volume_24h_avg'] + lag_cols)
     df_final = df_final.reset_index()
       
     df_final.to_csv("data/clean_reddit/final_submission_clean.csv", index=False)
