@@ -150,7 +150,14 @@ def clean_dataset(df_btc, df_eth, df_sol) -> None:
     df_final = df_final.join([df_btc, df_eth, df_sol], how="inner")
     
     df_final['hour_of_day'] = df_final.index.hour
+    df_final['hour_sin'] = np.sin(2 * np.pi * df_final['hour_of_day'] / 24)
+    df_final['hour_cos'] = np.cos(2 * np.pi * df_final['hour_of_day'] / 24)     
+    
     df_final['day_of_week'] = df_final.index.dayofweek
+    df_final['day_sin'] = np.sin(2 * np.pi * df_final['day_of_week'] / 7)
+    df_final['day_cos'] = np.cos(2 * np.pi * df_final['day_of_week'] / 7)   
+    
+    df_final.drop(columns=['hour_of_day', 'day_of_week'], inplace=True)
     
     for p in prefixes:
         df_final[f'{p}_polarity'] = df_final[f'{p}_bullish_ratio'] - df_final[f'{p}_bearish_ratio']
