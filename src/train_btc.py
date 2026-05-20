@@ -2,9 +2,10 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import lightgbm as lgb
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.metrics import classification_report
+from sklearn.ensemble import RandomForestClassifier
+import xgboost as xgb
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import classification_report
 from sklearn.utils.class_weight import compute_sample_weight
 
 def train_and_evaluate(model, x, y, tss, model_name):
@@ -20,11 +21,7 @@ def train_and_evaluate(model, x, y, tss, model_name):
         x_train, x_test = x.iloc[train_index], x.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
 
-        if model_name == "XGBoost":
-            sample_weights = compute_sample_weight(class_weight="balanced", y=y_train)
-            model.fit(x_train, y_train, sample_weight=sample_weights)
-        else:
-            model.fit(x_train, y_train)
+        model.fit(x_train, y_train)
 
         y_pred = model.predict(x_test)
         print(classification_report(y_test, y_pred, zero_division=0))
@@ -39,30 +36,31 @@ def train_and_evaluate(model, x, y, tss, model_name):
         .reset_index(drop=True)
     )
 
-    plt.figure(figsize=(10, 6))
-    plt.barh(feature_importance_df["Feature"][:15], feature_importance_df["Importance"][:15])
-    plt.gca().invert_yaxis()
-    plt.title(f"Top 15 Features — {model_name} (avg. across folds)")
-    plt.tight_layout()
-    plt.show()
+    print(f"\nTop 15 Features — {model_name} (avg. across folds)")
+    print(feature_importance_df.head(15).to_string(index=False)) 
 
 def main():
     df = pd.read_csv("data/clean_reddit/final_submission_clean.csv")
     df.set_index("index", inplace=True)
-    y = df["BTC_vol_target"].astype(int)
+    
+    df["BTC_vol_target_binary"] = df["BTC_vol_target"].apply(lambda x: 1 if int(x) == 2 else 0)
+    y = df["BTC_vol_target_binary"]
+    
+    #y = df["BTC_vol_target"].astype(int)
 
     to_drop_cols = ["BTC_vol_target", "ETH_vol_target", "SOL_vol_target",
-        "BTC-USD_close", "ETH-USD_close", "SOL-USD_close"
+        "BTC-USD_close", "ETH-USD_close", "SOL-USD_close", "BTC_vol_target_binary"
     ]
     x = df.drop(columns=to_drop_cols)
-    
-    print(x.isnull().sum()[x.isnull().sum() > 0])
 
     tss = TimeSeriesSplit(n_splits=5)
 
-    model_xgb = GradientBoostingClassifier(
+    model_xgb = xgb.XGBClassifier(
+        objective="binary:logistic",
         max_depth=5,
+        learning_rate=0.05,
         random_state=42,
+        eval_metric='logloss',
     )
     model_rf = RandomForestClassifier(
         n_estimators=100,
@@ -71,7 +69,7 @@ def main():
         class_weight="balanced",
     )
     model_lgb = lgb.LGBMClassifier(
-        objective="multiclass",
+        objective="binary",
         max_depth=3,
         random_state=42,
         class_weight="balanced",
