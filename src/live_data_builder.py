@@ -5,8 +5,8 @@ import pickle
 import ccxt
 import numpy as np
 import pandas as pd
-import requests
 from datetime import datetime, timezone, timedelta
+from curl_cffi import requests as cffi_requests
 
 def clean_reddit_text(text):
     if not isinstance(text, str):
@@ -84,56 +84,133 @@ def generate_financial_columns(group):
         "GEN_weighted_sentiment": ((bullish_gen - bearish_gen) / gen_count) * post_count if gen_count else 0
     })
 
-def get_reddit_content(datasets, svm_model):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) VolatilityPipelineBot/2.0"}
+import requests
+import pandas as pd
+import time
+import random
+
+def get_reddit_content(datasets, svm_model, start_dt=None, max_pages=5):
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "sentiment-bot/1.0 (contact: u/DavidRT49)",
+        "Accept": "application/json"
+    })
+
     all_dfs = []
-    
+
+    sentiment_col_map = {
+        "bitcoin": "sentiment_btc",
+        "ethereum": "sentiment_eth",
+        "solana": "sentiment_sol",
+    }
+
     for dataset in datasets:
-        url = f"https://www.reddit.com/r/{dataset}/new.json?limit=100"
-        try:
-            response = requests.get(url, headers=headers, timeout=15)
-            if response.status_code != 200:
-                continue
-            data = response.json()
-            children = data.get("data", {}).get("children", [])
-            records = []
-            for post in children:
-                p_data = post.get("data", {})
-                created_utc = p_data.get("created_utc")
-                title = p_data.get("title", "")
-                selftext = p_data.get("selftext", "")
-                if not created_utc or not title:
+        after = None
+        page = 0
+        records = []
+        page_limit = max_pages if start_dt is not None else 1
+
+        while page < page_limit:
+            url = f"https://www.reddit.com/r/{dataset}/new.json?limit=100"
+            if after:
+                url = f"{url}&after={after}"
+            print(f"Fetching {url}...")
+
+            try:
+                response = session.get(url, timeout=15)
+
+                # --- Handle rate limiting explicitly ---
+                if response.status_code == 429:
+                    print(f"r/{dataset}: rate limited (429), sleeping longer...")
+                    time.sleep(20)
                     continue
-                clean_text = clean_reddit_text(f"{title} {selftext}")
-                records.append({
-                    "created": pd.to_datetime(created_utc, unit="s", utc=True),
-                    "text": clean_text
-                })
-            if not records:
-                continue
-            sub_df = pd.DataFrame(records)
-            if dataset == "bitcoin":
-                sub_df["sentiment_btc"] = svm_model.predict(sub_df["text"])
-            elif dataset == "ethereum":
-                sub_df["sentiment_eth"] = svm_model.predict(sub_df["text"])
-            elif dataset == "solana":
-                sub_df["sentiment_sol"] = svm_model.predict(sub_df["text"])
-            else:
-                sub_df["sentiment_gen"] = svm_model.predict(sub_df["text"])
-            all_dfs.append(sub_df)
-            time.sleep(2)
-        except Exception as e:
-            print(f"Failed parsing streaming data for r/{dataset}: {e}")
-            
+
+                if response.status_code != 200:
+                    print(f"r/{dataset} HTTP {response.status_code}")
+                    print(response.text[:200])
+                    break
+
+                # --- Ensure we actually got JSON ---
+                content_type = response.headers.get("Content-Type", "")
+                if "application/json" not in content_type:
+                    print(f"r/{dataset}: non-JSON response")
+                    print(response.text[:200])
+                    break
+
+                data = response.json()
+
+                children = data.get("data", {}).get("children", [])
+                if not children:
+                    print(f"r/{dataset}: no posts returned")
+                    break
+
+                reached_older = False
+                for post in children:
+                    p_data = post.get("data", {})
+
+                    created_utc = p_data.get("created_utc")
+                    title = p_data.get("title", "")
+
+                    if not created_utc or not title:
+                        continue
+
+                    created_dt = pd.to_datetime(created_utc, unit="s", utc=True)
+                    if start_dt is not None and created_dt < start_dt:
+                        reached_older = True
+                        continue
+
+                    selftext = p_data.get("selftext", "")
+                    clean_text = clean_reddit_text(f"{title} {selftext}")
+
+                    records.append({
+                        "created": created_dt,
+                        "subreddit": dataset,
+                        "text": clean_text
+                    })
+
+                after = data.get("data", {}).get("after")
+                if reached_older or not after:
+                    break
+
+                page += 1
+
+                # Respect Reddit throttling (important)
+                time.sleep(8 + random.random() * 3)
+
+            except requests.exceptions.RequestException as e:
+                print(f"Network error for r/{dataset}: {e}")
+                break
+
+            except Exception as e:
+                print(f"Parsing error for r/{dataset}: {e}")
+                break
+
+        if not records:
+            print(f"r/{dataset}: no valid posts parsed")
+            continue
+
+        sub_df = pd.DataFrame(records)
+
+        col = sentiment_col_map.get(dataset, "sentiment_gen")
+        sub_df[col] = svm_model.predict(sub_df["text"])
+
+        print(f"r/{dataset}: {len(sub_df)} posts → {col}")
+
+        all_dfs.append(sub_df)
+
     if not all_dfs:
         return pd.DataFrame()
+
     final_df = pd.concat(all_dfs, ignore_index=True)
     return final_df.set_index("created").sort_index()
-
 def main():
 
     now = datetime.now(timezone.utc)
-    start_history = now - timedelta(days=2) # Pulls last 48 hours to ensure lag features fill
+    rolling_window_hours = 24
+    max_lag_hours = 12
+    target_shift_hours = 1
+    lookback_hours = rolling_window_hours + max_lag_hours + target_shift_hours + 2
+    start_history = now - timedelta(hours=lookback_hours)
 
     print(f"Fetching CCXT price feeds from {start_history} to {now}...")
     btc_raw = fetch_ccxt("BTC/USDT", start_history, now)
@@ -150,12 +227,22 @@ def main():
     
     svm_model = pickle.load(open("data/models/svm.pkl", "rb"))
     
-    df_final = get_reddit_content(subreddits, svm_model)
+    df_final = get_reddit_content(subreddits, svm_model, start_dt=start_history, max_pages=10)
     if df_final.empty:
         print("No new entries, stopping.")
         return
 
+    raw_posts_path = "data/clean_reddit/live_reddit_posts.csv"
+    df_final.reset_index().to_csv(raw_posts_path, index=False)
+    print(f"Saved raw Reddit posts to {raw_posts_path}")
+
     df_final = df_final.resample("60min").apply(generate_financial_columns)
+    hourly_index = pd.date_range(
+        start=pd.Timestamp(start_history).floor("h"),
+        end=pd.Timestamp(now).floor("h"),
+        freq="1h",
+    )
+    df_final = df_final.reindex(hourly_index).fillna(0)
     df_final["BTC_delta_sentiment"] = df_final["BTC_sentiment_score"].diff().fillna(0)
     df_final["ETH_delta_sentiment"] = df_final["ETH_sentiment_score"].diff().fillna(0)
     df_final["SOL_delta_sentiment"] = df_final["SOL_sentiment_score"].diff().fillna(0)
@@ -204,15 +291,27 @@ def main():
     
     lag_cols = [f'{col}_lag_{lag}' for col in features_to_lag for lag in [1, 3, 6, 12]]
     df_final = df_final.dropna(subset=['BTC_vol_target', 'post_volume_24h_avg'] + lag_cols)
+
+    if df_final.empty:
+        print("No complete rows after feature engineering, stopping.")
+        return
     
     latest_completed_row = df_final.iloc[[-1]]
+    latest_completed_row.index.name = "index"
+    latest_ts = latest_completed_row.index[0]
     
     csv_path = "data/clean_reddit/live_data.csv"
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     
     if not os.path.exists(csv_path):
         latest_completed_row.to_csv(csv_path, index=True)
         print("Created new CSV file")
     else:
+        existing = pd.read_csv(csv_path, index_col=0)
+        existing.index = pd.to_datetime(existing.index, utc=True, errors="coerce")
+        if latest_ts in existing.index:
+            print(f"Latest hour {latest_ts} already exists, skipping append.")
+            return
         latest_completed_row.to_csv(csv_path, mode='a', header=False, index=True)
         print("Successfully appended new hourly data.")
 
