@@ -6,7 +6,7 @@ import ccxt
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone, timedelta
-from curl_cffi import requests as cffi_requests
+import requests
 
 def clean_reddit_text(text):
     if not isinstance(text, str):
@@ -66,6 +66,10 @@ def generate_financial_columns(group):
 
     return pd.Series({
         "total_post_count": post_count,
+        "BTC_post_count": btc_count,
+        "ETH_post_count": eth_count,
+        "SOL_post_count": sol_count,
+        "GEN_post_count": gen_count,
         "BTC_bullish_ratio": bullish_btc / post_count if post_count else 0,
         "ETH_bullish_ratio": bullish_eth / post_count if post_count else 0,
         "SOL_bullish_ratio": bullish_sol / post_count if post_count else 0,
@@ -84,15 +88,10 @@ def generate_financial_columns(group):
         "GEN_weighted_sentiment": ((bullish_gen - bearish_gen) / gen_count) * post_count if gen_count else 0
     })
 
-import requests
-import pandas as pd
-import time
-import random
-
 def get_reddit_content(datasets, svm_model, start_dt=None, max_pages=5):
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "sentiment-bot/1.0 (contact: u/DavidRT49)",
+        "User-Agent": "sentiment-app/1.0 (contact: u/DavidRT49)",
         "Accept": "application/json"
     })
 
@@ -111,15 +110,13 @@ def get_reddit_content(datasets, svm_model, start_dt=None, max_pages=5):
         page_limit = max_pages if start_dt is not None else 1
 
         while page < page_limit:
-            url = f"https://www.reddit.com/r/{dataset}/new.json?limit=100"
+            url = f"https://old.reddit.com/r/{dataset}/new.json?limit=50"
             if after:
                 url = f"{url}&after={after}"
             print(f"Fetching {url}...")
 
             try:
                 response = session.get(url, timeout=15)
-
-                # --- Handle rate limiting explicitly ---
                 if response.status_code == 429:
                     print(f"r/{dataset}: rate limited (429), sleeping longer...")
                     time.sleep(20)
@@ -130,7 +127,6 @@ def get_reddit_content(datasets, svm_model, start_dt=None, max_pages=5):
                     print(response.text[:200])
                     break
 
-                # --- Ensure we actually got JSON ---
                 content_type = response.headers.get("Content-Type", "")
                 if "application/json" not in content_type:
                     print(f"r/{dataset}: non-JSON response")
@@ -173,9 +169,7 @@ def get_reddit_content(datasets, svm_model, start_dt=None, max_pages=5):
                     break
 
                 page += 1
-
-                # Respect Reddit throttling (important)
-                time.sleep(8 + random.random() * 3)
+                time.sleep(10)
 
             except requests.exceptions.RequestException as e:
                 print(f"Network error for r/{dataset}: {e}")
@@ -197,12 +191,14 @@ def get_reddit_content(datasets, svm_model, start_dt=None, max_pages=5):
         print(f"r/{dataset}: {len(sub_df)} posts → {col}")
 
         all_dfs.append(sub_df)
+        time.sleep(10)
 
     if not all_dfs:
         return pd.DataFrame()
 
     final_df = pd.concat(all_dfs, ignore_index=True)
     return final_df.set_index("created").sort_index()
+
 def main():
 
     now = datetime.now(timezone.utc)
@@ -225,7 +221,7 @@ def main():
     prefixes = ['BTC', 'ETH', 'SOL', 'GEN']
     tickers = ['BTC-USD', 'ETH-USD', 'SOL-USD']
     
-    svm_model = pickle.load(open("data/models/svm.pkl", "rb"))
+    svm_model = pickle.load(open("../data/models/svm.pkl", "rb"))
     
     df_final = get_reddit_content(subreddits, svm_model, start_dt=start_history, max_pages=10)
     if df_final.empty:
@@ -243,10 +239,23 @@ def main():
         freq="1h",
     )
     df_final = df_final.reindex(hourly_index).fillna(0)
-    df_final["BTC_delta_sentiment"] = df_final["BTC_sentiment_score"].diff().fillna(0)
-    df_final["ETH_delta_sentiment"] = df_final["ETH_sentiment_score"].diff().fillna(0)
-    df_final["SOL_delta_sentiment"] = df_final["SOL_sentiment_score"].diff().fillna(0)
-    df_final["GEN_delta_sentiment"] = df_final["GEN_sentiment_score"].diff().fillna(0)
+    df_final["BTC_delta_sentiment"] = df_final["BTC_sentiment_score"].diff()
+    df_final["ETH_delta_sentiment"] = df_final["ETH_sentiment_score"].diff()
+    df_final["SOL_delta_sentiment"] = df_final["SOL_sentiment_score"].diff()
+    df_final["GEN_delta_sentiment"] = df_final["GEN_sentiment_score"].diff()
+    
+    for prefix in ["BTC", "ETH", "SOL", "GEN"]:
+        count_col = f"{prefix}_post_count"
+        delta_col = f"{prefix}_delta_sentiment"
+        df_final.loc[df_final[count_col] == 0, delta_col] = 0
+        
+    df_final[["BTC_delta_sentiment",
+              "ETH_delta_sentiment",
+              "SOL_delta_sentiment",
+              "GEN_delta_sentiment",
+    ]] = df_final[["BTC_delta_sentiment","ETH_delta_sentiment","SOL_delta_sentiment","GEN_delta_sentiment",]].fillna(0)
+    
+    df_final.drop(columns=["BTC_post_count","ETH_post_count","SOL_post_count","GEN_post_count",], inplace=True)
     
     df_final = df_final.join([btc, eth, sol], how="inner")
 
