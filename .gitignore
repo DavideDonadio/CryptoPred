@@ -6,6 +6,7 @@ dist/
 wheels/
 *.egg-info
 *.pkl
+data/clean_reddit/*.json
 
 # Virtual environments
 .venv

@@ -6,7 +6,7 @@ import ccxt
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone, timedelta
-import requests
+import json
 
 def clean_reddit_text(text):
     if not isinstance(text, str):
@@ -88,15 +88,7 @@ def generate_financial_columns(group):
         "GEN_weighted_sentiment": ((bullish_gen - bearish_gen) / gen_count) * post_count if gen_count else 0
     })
 
-def get_reddit_content(datasets, svm_model, start_dt=None, max_pages=1):
-    session = requests.Session()
-    session.headers.update({
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-    "Accept": "application/json,text/html;q=0.9",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "keep-alive",
-    "Referer": "https://www.reddit.com/",
-    })
+def get_reddit_content(datasets, svm_model, start_dt=None):
 
     all_dfs = []
 
@@ -107,80 +99,37 @@ def get_reddit_content(datasets, svm_model, start_dt=None, max_pages=1):
     }
 
     for dataset in datasets:
-        after = None
-        page = 0
         records = []
-        page_limit = max_pages if start_dt is not None else 1
 
-        while page < page_limit:
-            url = f"https://www.reddit.com/r/{dataset}/new.json?limit=25"
-            if after:
-                url = f"{url}&after={after}"
-            print(f"Fetching {url}...")
+        with open(f'data/clean_reddit/{dataset}.json', 'r') as file:
+            data = json.load(file)
 
-            try:
-                response = session.get(url, timeout=15)
-                if response.status_code == 429:
-                    print(f"r/{dataset}: rate limited (429), sleeping longer...")
-                    time.sleep(20)
-                    continue
+        children = data.get("data", {}).get("children", [])
+        if not children:
+            print(f"r/{dataset}: no posts returned")
+            continue
 
-                if response.status_code != 200:
-                    print(f"r/{dataset} HTTP {response.status_code}")
-                    print(response.text[:200])
-                    break
+        for post in children:
+            
+            p_data = post.get("data", {})
+            created_utc = p_data.get("created_utc")
+            title = p_data.get("title", "")
 
-                content_type = response.headers.get("Content-Type", "")
-                if "application/json" not in content_type:
-                    print(f"r/{dataset}: non-JSON response")
-                    print(response.text[:200])
-                    break
+            if not created_utc or not title:
+                continue
 
-                data = response.json()
+            created_dt = pd.to_datetime(created_utc, unit="s", utc=True)
+            if start_dt is not None and created_dt < start_dt:
+                continue
 
-                children = data.get("data", {}).get("children", [])
-                if not children:
-                    print(f"r/{dataset}: no posts returned")
-                    break
+            selftext = p_data.get("selftext", "")
+            clean_text = clean_reddit_text(f"{title} {selftext}")
 
-                reached_older = False
-                for post in children:
-                    p_data = post.get("data", {})
-
-                    created_utc = p_data.get("created_utc")
-                    title = p_data.get("title", "")
-
-                    if not created_utc or not title:
-                        continue
-
-                    created_dt = pd.to_datetime(created_utc, unit="s", utc=True)
-                    if start_dt is not None and created_dt < start_dt:
-                        reached_older = True
-                        continue
-
-                    selftext = p_data.get("selftext", "")
-                    clean_text = clean_reddit_text(f"{title} {selftext}")
-
-                    records.append({
-                        "created": created_dt,
-                        "subreddit": dataset,
-                        "text": clean_text
-                    })
-
-                after = data.get("data", {}).get("after")
-                if reached_older or not after:
-                    break
-
-                page += 1
-                time.sleep(10)
-
-            except requests.exceptions.RequestException as e:
-                print(f"Network error for r/{dataset}: {e}")
-                break
-
-            except Exception as e:
-                print(f"Parsing error for r/{dataset}: {e}")
-                break
+            records.append({
+                "created": created_dt,
+                "subreddit": dataset,
+                "text": clean_text
+            })
 
         if not records:
             print(f"r/{dataset}: no valid posts parsed")
@@ -192,9 +141,7 @@ def get_reddit_content(datasets, svm_model, start_dt=None, max_pages=1):
         sub_df[col] = svm_model.predict(sub_df["text"])
 
         print(f"r/{dataset}: {len(sub_df)} posts → {col}")
-
         all_dfs.append(sub_df)
-        time.sleep(10)
 
     if not all_dfs:
         return pd.DataFrame()
@@ -224,9 +171,9 @@ def main():
     prefixes = ['BTC', 'ETH', 'SOL', 'GEN']
     tickers = ['BTC-USD', 'ETH-USD', 'SOL-USD']
     
-    svm_model = pickle.load(open("../data/models/svm.pkl", "rb"))
+    svm_model = pickle.load(open("data/models/svm.pkl", "rb"))
     
-    df_final = get_reddit_content(subreddits, svm_model, start_dt=start_history, max_pages=1)
+    df_final = get_reddit_content(subreddits, svm_model, start_dt=start_history)
     if df_final.empty:
         print("No new entries, stopping.")
         return
