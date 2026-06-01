@@ -88,11 +88,14 @@ def generate_financial_columns(group):
         "GEN_weighted_sentiment": ((bullish_gen - bearish_gen) / gen_count) * post_count if gen_count else 0
     })
 
-def get_reddit_content(datasets, svm_model, start_dt=None, max_pages=5):
+def get_reddit_content(datasets, svm_model, start_dt=None, max_pages=1):
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "sentiment-app/1.0 (contact: u/DavidRT49)",
-        "Accept": "application/json"
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+    "Accept": "application/json,text/html;q=0.9",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive",
+    "Referer": "https://www.reddit.com/",
     })
 
     all_dfs = []
@@ -110,7 +113,7 @@ def get_reddit_content(datasets, svm_model, start_dt=None, max_pages=5):
         page_limit = max_pages if start_dt is not None else 1
 
         while page < page_limit:
-            url = f"https://old.reddit.com/r/{dataset}/new.json?limit=50"
+            url = f"https://www.reddit.com/r/{dataset}/new.json?limit=25"
             if after:
                 url = f"{url}&after={after}"
             print(f"Fetching {url}...")
@@ -223,7 +226,7 @@ def main():
     
     svm_model = pickle.load(open("../data/models/svm.pkl", "rb"))
     
-    df_final = get_reddit_content(subreddits, svm_model, start_dt=start_history, max_pages=10)
+    df_final = get_reddit_content(subreddits, svm_model, start_dt=start_history, max_pages=1)
     if df_final.empty:
         print("No new entries, stopping.")
         return
