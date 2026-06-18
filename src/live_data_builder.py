@@ -101,7 +101,7 @@ def get_reddit_content(datasets, svm_model, start_dt=None):
     for dataset in datasets:
         records = []
 
-        with open(f'data/clean_reddit/{dataset}.json', 'r') as file:
+        with open(f'../data/clean_reddit/{dataset}.json', 'r') as file:
             data = json.load(file)
 
         children = data.get("data", {}).get("children", [])
@@ -171,7 +171,7 @@ def main():
     prefixes = ['BTC', 'ETH', 'SOL', 'GEN']
     tickers = ['BTC-USD', 'ETH-USD', 'SOL-USD']
     
-    svm_model = pickle.load(open("data/models/svm.pkl", "rb"))
+    svm_model = pickle.load(open("../data/models/svm.pkl", "rb"))
     
     df_final = get_reddit_content(subreddits, svm_model, start_dt=start_history)
     if df_final.empty:
@@ -259,7 +259,7 @@ def main():
     latest_completed_row.index.name = "index"
     latest_ts = latest_completed_row.index[0]
     
-    csv_path = "data/clean_reddit/live_data.csv"
+    csv_path = "../data/clean_reddit/live_data.csv"
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     
     if not os.path.exists(csv_path):
