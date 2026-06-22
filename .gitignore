@@ -11,3 +11,6 @@ data/clean_reddit/*.json
 # Virtual environments
 .venv
 .vscode/settings.json
+data/clean_reddit/live_data.csv
+data/clean_reddit/predictions.csv
+data/clean_reddit/live_reddit_posts.csv

@@ -31,6 +31,9 @@ def fetch_ccxt(symbol, start_str, end_str, timeframe='1h'):
     end = exchange.parse8601(f"{end_str}T23:59:59Z")
     
     all_kline = []
+
+    if start is None or end is None:
+        raise ValueError("Could not parse the provided start_str or end_str dates.")
     
     while start < end:
         
@@ -161,7 +164,7 @@ def clean_dataset(df_btc, df_eth, df_sol) -> None:
     
     for p in prefixes:
         df_final[f'{p}_polarity'] = df_final[f'{p}_bullish_ratio'] - df_final[f'{p}_bearish_ratio']
-        
+
     features_to_lag = []
     
     for p in prefixes:

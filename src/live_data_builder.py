@@ -29,6 +29,9 @@ def fetch_ccxt(symbol, start_dt, end_dt, timeframe='1h'):
     start = exchange.parse8601(start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
     end = exchange.parse8601(end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
     all_kline = []
+
+    if start is None or end is None:
+        raise ValueError("Could not parse the provided start_str or end_str dates.")
     
     while start < end:
         try:
@@ -101,7 +104,7 @@ def get_reddit_content(datasets, svm_model, start_dt=None):
     for dataset in datasets:
         records = []
 
-        with open(f'../data/clean_reddit/{dataset}.json', 'r') as file:
+        with open(f'data/clean_reddit/{dataset}.json', 'r') as file:
             data = json.load(file)
 
         children = data.get("data", {}).get("children", [])
@@ -171,7 +174,7 @@ def main():
     prefixes = ['BTC', 'ETH', 'SOL', 'GEN']
     tickers = ['BTC-USD', 'ETH-USD', 'SOL-USD']
     
-    svm_model = pickle.load(open("../data/models/svm.pkl", "rb"))
+    svm_model = pickle.load(open("data/models/svm.pkl", "rb"))
     
     df_final = get_reddit_content(subreddits, svm_model, start_dt=start_history)
     if df_final.empty:
@@ -209,10 +212,10 @@ def main():
     
     df_final = df_final.join([btc, eth, sol], how="inner")
 
-    df_final['hour_of_day'] = df_final.index.hour
+    df_final['hour_of_day'] = df_final.index.hour # type: ignore
     df_final['hour_sin'] = np.sin(2 * np.pi * df_final['hour_of_day'] / 24)
     df_final['hour_cos'] = np.cos(2 * np.pi * df_final['hour_of_day'] / 24)     
-    df_final['day_of_week'] = df_final.index.dayofweek
+    df_final['day_of_week'] = df_final.index.dayofweek # type: ignore
     df_final['day_sin'] = np.sin(2 * np.pi * df_final['day_of_week'] / 7)
     df_final['day_cos'] = np.cos(2 * np.pi * df_final['day_of_week'] / 7)   
     df_final.drop(columns=['hour_of_day', 'day_of_week'], inplace=True)
@@ -259,7 +262,7 @@ def main():
     latest_completed_row.index.name = "index"
     latest_ts = latest_completed_row.index[0]
     
-    csv_path = "../data/clean_reddit/live_data.csv"
+    csv_path = "data/clean_reddit/live_data.csv"
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     
     if not os.path.exists(csv_path):
