@@ -264,18 +264,22 @@ def main():
     
     csv_path = "data/clean_reddit/live_data.csv"
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    
-    if not os.path.exists(csv_path):
+
+    if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
         latest_completed_row.to_csv(csv_path, index=True)
-        print("Created new CSV file")
+        print("Created new CSV file (or overwrote empty file)")
     else:
-        existing = pd.read_csv(csv_path, index_col=0)
-        existing.index = pd.to_datetime(existing.index, utc=True, errors="coerce")
-        if latest_ts in existing.index:
-            print(f"Latest hour {latest_ts} already exists, skipping append.")
-            return
-        latest_completed_row.to_csv(csv_path, mode='a', header=False, index=True)
-        print("Successfully appended new hourly data.")
+        try:
+            existing = pd.read_csv(csv_path, index_col=0)
+            existing.index = pd.to_datetime(existing.index, utc=True, errors="coerce")
+            if latest_ts in existing.index:
+                print(f"Latest hour {latest_ts} already exists, skipping append.")
+                return
+            latest_completed_row.to_csv(csv_path, mode='a', header=False, index=True)
+            print("Successfully appended new hourly data.")
+        except pd.errors.EmptyDataError:
+            latest_completed_row.to_csv(csv_path, index=True)
+            print("Caught EmptyDataError: Overwrote empty file with fresh data.")
 
 if __name__ == "__main__":
     main()
