@@ -187,14 +187,32 @@ def clean_dataset(df_btc, df_eth, df_sol) -> None:
     train_size = int(len(df_final) * 0.7)
     train_df = df_final.iloc[:train_size].copy()
 
-    _, bins = pd.qcut(train_df['BTC-USD_volatility'], q=3, retbins=True)
+    _, btc_bins = pd.qcut(train_df['BTC-USD_volatility'], q=3, retbins=True)
+    _, eth_bins = pd.qcut(train_df['ETH-USD_volatility'], q=3, retbins=True)
+    _, sol_bins = pd.qcut(train_df['SOL-USD_volatility'], q=3, retbins=True)
 
-    bins[0] = -np.inf
-    bins[-1] = np.inf
+    for b in [btc_bins, eth_bins, sol_bins]:
+        b[0] = -np.inf
+        b[-1] = np.inf
 
-    df_final['BTC_vol_target'] = pd.cut(df_final['BTC-USD_volatility'], bins=bins, labels=[0, 1, 2])
-    df_final['SOL_vol_target'] = pd.cut(df_final['SOL-USD_volatility'], bins=bins, labels=[0, 1, 2])
-    df_final['ETH_vol_target'] = pd.cut(df_final['ETH-USD_volatility'], bins=bins, labels=[0, 1, 2])
+    df_final['BTC_vol_target'] = pd.cut(df_final['BTC-USD_volatility'], bins=btc_bins, labels=[0, 1, 2])
+    df_final['ETH_vol_target'] = pd.cut(df_final['ETH-USD_volatility'], bins=eth_bins, labels=[0, 1, 2])
+    df_final['SOL_vol_target'] = pd.cut(df_final['SOL-USD_volatility'], bins=sol_bins, labels=[0, 1, 2])
+
+    print("BTC: MODEL BOUNDARIES")
+    print(f"Low Volatility (Class 0): Everything from 0% up to {btc_bins[1]*100:.3f}%")
+    print(f"Medium Volatility (Class 1): Between {btc_bins[1]*100:.3f}% and {btc_bins[2]*100:.3f}%")
+    print(f"High Volatility (Class 2): Everything above {btc_bins[2]*100:.3f}%")
+
+    print("ETH: MODEL BOUNDARIES")
+    print(f"Low Volatility (Class 0): Everything from 0% up to {eth_bins[1]*100:.3f}%")
+    print(f"Medium Volatility (Class 1): Between {eth_bins[1]*100:.3f}% and {eth_bins[2]*100:.3f}%")
+    print(f"High Volatility (Class 2): Everything above {eth_bins[2]*100:.3f}%")
+
+    print("SOL: MODEL BOUNDARIES")
+    print(f"Low Volatility (Class 0): Everything from 0% up to {sol_bins[1]*100:.3f}%")
+    print(f"Medium Volatility (Class 1): Between {sol_bins[1]*100:.3f}% and {sol_bins[2]*100:.3f}%")
+    print(f"High Volatility (Class 2): Everything above {sol_bins[2]*100:.3f}%")
 
     df_final['BTC_vol_target'] = df_final['BTC_vol_target'].shift(-1)
     df_final['SOL_vol_target'] = df_final['SOL_vol_target'].shift(-1)
