@@ -240,9 +240,9 @@ def main():
         
     df_final.drop(columns=[f'{p}_polarity' for p in prefixes], inplace=True)
     
-    df_final['BTC_vol_target'] = pd.cut(df_final['BTC-USD_volatility'], bins=[-np.inf, 0.015, 0.035, np.inf], labels=[0, 1, 2])
-    df_final['SOL_vol_target'] = pd.cut(df_final['SOL-USD_volatility'], bins=[-np.inf, 0.015, 0.035, np.inf], labels=[0, 1, 2])
-    df_final['ETH_vol_target'] = pd.cut(df_final['ETH-USD_volatility'], bins=[-np.inf, 0.015, 0.035, np.inf], labels=[0, 1, 2])
+    df_final['BTC_vol_target'] = pd.cut(df_final['BTC-USD_volatility'], bins=[-np.inf, 0.00638, 0.01069, np.inf], labels=[0, 1, 2])
+    df_final['SOL_vol_target'] = pd.cut(df_final['SOL-USD_volatility'], bins=[-np.inf, 0.01205, 0.01960, np.inf], labels=[0, 1, 2])
+    df_final['ETH_vol_target'] = pd.cut(df_final['ETH-USD_volatility'], bins=[-np.inf, 0.00867, 0.01427, np.inf], labels=[0, 1, 2])
 
     df_final['BTC_vol_target'] = df_final['BTC_vol_target'].shift(-1)
     df_final['SOL_vol_target'] = df_final['SOL_vol_target'].shift(-1)
@@ -252,13 +252,13 @@ def main():
     df_final['post_spike_ratio'] = df_final['total_post_count'] / (df_final['post_volume_24h_avg'] + 1)
     
     lag_cols = [f'{col}_lag_{lag}' for col in features_to_lag for lag in [1, 3, 6, 12]]
-    df_final = df_final.dropna(subset=['BTC_vol_target', 'post_volume_24h_avg'] + lag_cols)
+    df_final = df_final.dropna(subset=['post_volume_24h_avg'] + lag_cols)
 
     if df_final.empty:
         print("No complete rows after feature engineering, stopping.")
         return
     
-    latest_completed_row = df_final.iloc[[-1]]
+    latest_completed_row = df_final.iloc[[-1]].copy()
     latest_completed_row.index.name = "index"
     latest_ts = latest_completed_row.index[0]
     
