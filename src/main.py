@@ -1,82 +1,243 @@
 from fastapi import FastAPI, HTTPException, Query
+from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse
 import os
 import json
 import pickle
+import logging
 import numpy as np
 import pandas as pd
 import asyncio
 from datetime import datetime, timezone, timedelta
 
-app = FastAPI()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("cryptopred")
+
+PROFILES = {
+    "Conservative": {"gain": 0.030, "cost": 0.010},
+    "Standard":     {"gain": 0.060, "cost": 0.020},
+    "Aggressive":   {"gain": 0.105, "cost": 0.035},
+}
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 LIVE_DATA_PATH = os.path.join(BASE_DIR, "data", "clean_reddit", "live_data.csv")
-XGB_MODEL_PATH = os.path.join(BASE_DIR, "data", "models", "xgb.pkl")
-LGB_MODEL_PATH = os.path.join(BASE_DIR, "data", "models", "lgb.pkl")
 PREDICTIONS = os.path.join(BASE_DIR, "data", "clean_reddit", "predictions.csv")
+THRESHOLDS_JSON = os.path.join(BASE_DIR, "data", "models", "optimal_thresholds.json")
+
+LEVERAGE = 3
+FEES = 0.0005
+SLIPPAGE = 0.0005
+RT_COST = 2 * (FEES + SLIPPAGE) * LEVERAGE
+
+ACTIVE_PROFILE = os.environ.get("CRYPTOPRED_PROFILE", "Standard")
+if ACTIVE_PROFILE not in PROFILES:
+    logger.warning("Unknown profile '%s' — falling back to Standard", ACTIVE_PROFILE)
+    ACTIVE_PROFILE = "Standard"
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    asyncio.create_task(scheduler())
+    yield
+
+app = FastAPI(lifespan=lifespan)
+
+def model_path(model_type: str) -> str:
+    return os.path.join(BASE_DIR, "data", "models", f"{model_type}_{ACTIVE_PROFILE.lower()}.pkl")
+
+def load_threshold_from_json() -> dict[str, float]:
+    default = {"lgb": 0.50}
+    if not os.path.exists(THRESHOLDS_JSON):
+        logger.warning("%s not found. Using default 0.50.", THRESHOLDS_JSON)
+        return default
+    try:
+        with open(THRESHOLDS_JSON, "r") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        logger.warning("Could not parse %s. Using default 0.50.", THRESHOLDS_JSON)
+        return default
+
+    profile_data = data.get(ACTIVE_PROFILE, {})
+    if not profile_data:
+        logger.warning("Profile '%s' not found in JSON. Using default 0.50.", ACTIVE_PROFILE)
+        return default
+    return profile_data
+
+def safe_read_csv(path: str, **kwargs) -> pd.DataFrame:
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path, **kwargs)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+
+def _write_prediction(pred_row: pd.DataFrame) -> None:
+    df = safe_read_csv(PREDICTIONS)
+
+    if df.empty or "timestamp" not in df.columns:
+        pred_row.to_csv(PREDICTIONS, index=False)
+        return
+
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    new_ts = pd.to_datetime(pred_row["timestamp"].iloc[0], utc=True)
+
+    if new_ts not in df["timestamp"].values:
+        pred_row.to_csv(PREDICTIONS, mode="a", header=False, index=False)
 
 def run_prediction():
-    
-    if not os.path.exists(LGB_MODEL_PATH) or not os.path.exists(XGB_MODEL_PATH):
-        raise HTTPException(status_code=503, detail="Model files not found")
+    lgb_path = model_path("lgb")
+    if not os.path.exists(lgb_path):
+        raise RuntimeError(f"Model file not found: {lgb_path}")
 
     row = load_last_live_data_row()
+    timestamp = pd.to_datetime(row.index[0]).isoformat()
     to_drop_cols = ["BTC_vol_target", "ETH_vol_target", "SOL_vol_target"]
-    features = row.drop(columns=to_drop_cols)
-    features = features.fillna(0)
-    
-    lgb = pickle.load(open(LGB_MODEL_PATH, 'rb'))
-    xgb = pickle.load(open(XGB_MODEL_PATH, 'rb'))
-    
-    features = features[lgb.feature_names_in_]
-    
-    xgb_low, xgb_high = xgb.predict_proba(features)[0]
-    lgb_low, lgb_high = lgb.predict_proba(features)[0]
+    features = row.drop(columns=to_drop_cols, errors="ignore")
 
-    avg_low = (xgb_low + lgb_low) / 2.0
-    avg_high = (xgb_high + lgb_high) / 2.0
-    prediction = "low" if avg_low >= avg_high else "high"
-    
+    nan_cols = features.columns[features.isna().any()].tolist()
+    if nan_cols:
+        logger.warning("Feature columns with NaN values (filling with 0): %s", nan_cols)
+
+    features = features.fillna(0)
+
+    lgb = pickle.load(open(lgb_path, "rb"))
+
+    if hasattr(lgb, "feature_names_in_"):
+        features = features[lgb.feature_names_in_]
+    elif hasattr(lgb, "feature_name_"):
+        features = features[lgb.feature_name_]
+    _, lgb_high = lgb.predict_proba(features)[0]
+
+    thresholds = load_threshold_from_json()
+    current_threshold = thresholds.get("lgb", 0.50)
+
+    signal = 1 if lgb_high > current_threshold else 0
+    prediction = "high" if signal == 1 else "low"
+
     pred_row = pd.DataFrame([{
-    "timestamp": row.index[0].isoformat(),
-    "prediction": prediction,
-    "prob_low": avg_low,
-    "prob_high": avg_high,
+        "timestamp": timestamp,
+        "prediction": prediction,
+        "prob_high": lgb_high,
+        "signal_triggered": signal,
+        "profile_used": ACTIVE_PROFILE,
+        "threshold_used": current_threshold,
     }])
-    
-    if not os.path.exists(PREDICTIONS):
-        pred_row.to_csv(PREDICTIONS, index = False)
-    else:
-        
-        df = pd.read_csv(PREDICTIONS)
-        if pred_row["timestamp"].iloc[0] not in df["timestamp"].values:
-            pred_row.to_csv(PREDICTIONS, mode = "a", header = False, index = False)
+
+    _write_prediction(pred_row)
 
     return {
         "prediction": prediction,
-        "prob_low": avg_low,
-        "prob_high": avg_high,
+        "prob_high": lgb_high,
+        "signal_triggered": signal,
+        "profile": ACTIVE_PROFILE,
+        "threshold": current_threshold,
     }
 
+def compute_prediction() -> dict:
+    lgb_path = model_path("lgb")
+    if not os.path.exists(lgb_path):
+        raise RuntimeError(f"Model file not found: {lgb_path}")
+
+    row = load_last_live_data_row()
+    to_drop_cols = ["BTC_vol_target", "ETH_vol_target", "SOL_vol_target"]
+    features = row.drop(columns=to_drop_cols, errors="ignore")
+
+    nan_cols = features.columns[features.isna().any()].tolist()
+    if nan_cols:
+        logger.warning("Feature columns with NaN values (filling with 0): %s", nan_cols)
+
+    features = features.fillna(0)
+
+    lgb = pickle.load(open(lgb_path, "rb"))
+    if hasattr(lgb, "feature_names_in_"):
+        features = features[lgb.feature_names_in_]
+    elif hasattr(lgb, "feature_name_"):
+        features = features[lgb.feature_name_]
+    _, lgb_high = lgb.predict_proba(features)[0]
+
+    thresholds = load_threshold_from_json()
+    current_threshold = thresholds.get("lgb", 0.50)
+
+    signal = 1 if lgb_high > current_threshold else 0
+    prediction = "high" if signal == 1 else "low"
+
+    return {
+        "prediction": prediction,
+        "prob_high": lgb_high,
+        "signal_triggered": signal,
+        "profile": ACTIVE_PROFILE,
+        "threshold": current_threshold,
+    }
+
+def _load_live_data(limit: int | None = None) -> pd.DataFrame:
+    df = safe_read_csv(LIVE_DATA_PATH, index_col=0)
+    if df.empty:
+        raise FileNotFoundError("live_data.csv not found or is empty")
+    df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+    df = df.sort_index()
+    if limit is not None:
+        return df.tail(limit)
+    return df
+
 def load_btc_price_series(limit: int) -> pd.DataFrame:
-    if not os.path.exists(LIVE_DATA_PATH):
-        raise HTTPException(status_code=404, detail="live_data.csv not found")
+    return _load_live_data(limit)
 
-    df = pd.read_csv(LIVE_DATA_PATH, index_col=0)
-    df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
-    df = df.sort_index()
-    return df.tail(limit)
-    
 def load_last_live_data_row() -> pd.DataFrame:
-    if not os.path.exists(LIVE_DATA_PATH):
-        raise HTTPException(status_code=404, detail="live_data.csv not found")
+    return _load_live_data(1)
 
-    df = pd.read_csv(LIVE_DATA_PATH, index_col=0)
-    df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
-    df = df.sort_index()
-    return df.tail(1)
+@app.get("/api/performance")
+def get_performance_metrics():
+    preds_df = safe_read_csv(PREDICTIONS)
+    live_df = safe_read_csv(LIVE_DATA_PATH, index_col=0)
 
+    if not preds_df.empty and "profile_used" in preds_df.columns:
+        preds_df = preds_df[preds_df["profile_used"] == ACTIVE_PROFILE]
+
+    if preds_df.empty or live_df.empty:
+        return {"msg": "No historical tracking data available yet."}
+
+    live_df.index = pd.to_datetime(live_df.index, utc=True, errors="coerce")
+    preds_df["timestamp"] = pd.to_datetime(preds_df["timestamp"], utc=True)
+
+    now = datetime.now(timezone.utc)
+    live_df = live_df[live_df.index + pd.Timedelta(hours=1) <= now]
+    live_df = live_df.dropna(subset=["BTC_vol_target"])
+
+    if live_df.empty:
+        return {"msg": "Waiting for ground-truth data to finalize."}
+
+    live_df["true_target"] = (live_df["BTC_vol_target"].astype(float) == 2.0).astype(int)
+
+    merged = pd.merge(preds_df, live_df[["true_target"]], left_on="timestamp", right_index=True, how="inner")
+
+    if merged.empty:
+        return {"msg": "Waiting for ground-truth data to finalize."}
+
+    trades = merged[merged["signal_triggered"] == 1]
+    no_trades = merged[merged["signal_triggered"] == 0]
+    total_trades = len(trades)
+
+    tp = int(np.sum((trades["true_target"] == 1))) if total_trades > 0 else 0
+    fp = int(np.sum((trades["true_target"] == 0))) if total_trades > 0 else 0
+    fn = int(np.sum((no_trades["true_target"] == 1)))
+    tn = int(np.sum((no_trades["true_target"] == 0)))
+
+    total_hours = tp + fp + fn + tn
+    overall_accuracy = (tp + tn) / total_hours if total_hours > 0 else 0.0
+
+    cfg = PROFILES[ACTIVE_PROFILE]
+    payoff = tp * cfg["gain"] - fp * cfg["cost"] - (tp + fp) * RT_COST if total_trades > 0 else 0.0
+    win_rate = tp / total_trades if total_trades > 0 else 0.0
+
+    return {
+        "total_trades": total_trades,
+        "win_rate": float(win_rate),
+        "cumulative_payoff": float(payoff),
+        "sample_size": total_hours,
+        "missed_swings": int(fn),
+        "correct_low_calls": int(tn),
+        "overall_accuracy": float(overall_accuracy),
+    }
 
 @app.get("/api/btc-price")
 def btc_price(limit: int = Query(12, ge=1, le=720)):
@@ -85,28 +246,38 @@ def btc_price(limit: int = Query(12, ge=1, le=720)):
             "timestamps": [ts.isoformat() for ts in df.index],
             "prices": [float(val) for val in df["BTC-USD_close"].tolist()],
     }
-        
+
 @app.get("/api/volatility")
 def volatility(limit: int = Query(1, ge=1, le=720)):
-    return(run_prediction())
+    try:
+        return compute_prediction()
+    except Exception as e:
+        logger.error("Prediction fallback active due to: %s", e)
+        return {
+            "prediction": None,
+            "prob_high": None,
+            "signal_triggered": None,
+            "profile": ACTIVE_PROFILE,
+            "threshold": None,
+            "status": "no_prediction",
+        }
 
 async def scheduler():
     while True:
         now = datetime.now(timezone.utc)
-        next_run = now.replace(minute = 2, second = 0)
+        next_run = now.replace(minute=2, second=0, microsecond=0)
         if next_run <= now:
-            next_run += timedelta(hours = 1)
+            next_run += timedelta(hours=1)
         await asyncio.sleep((next_run - now).total_seconds())
-        run_prediction()
-        
-@app.on_event("startup")
-async def startup():
-    asyncio.create_task(scheduler())
-    
+        try:
+            run_prediction()
+        except Exception as e:
+            logger.error("[scheduler] run_prediction failed: %s", e)
+
 @app.get("/", response_class=HTMLResponse)
 def root() -> HTMLResponse:
-        return HTMLResponse(
-                """
+    return HTMLResponse(
+        """
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -165,21 +336,95 @@ def root() -> HTMLResponse:
             <div class="status" id="volatilityStatus">Loading...</div>
             <div class="status" id="volatilityDetails"></div>
         </div>
+        <div class="card" style="margin-top: 16px;">
+            <h2 style="margin: 0 0 8px; font-size: 20px;">Live Strategy Tracker</h2>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 10px;">
+                <div>
+                    <div style="font-size: 11px; color: #9aa3b2; text-transform: uppercase;">Trades Taken</div>
+                    <div id="trackTrades" style="font-size: 20px; font-weight: bold; color: #f4f5f7;">0</div>
+                </div>
+                <div>
+                    <div style="font-size: 11px; color: #9aa3b2; text-transform: uppercase;">Realized Win Rate</div>
+                    <div id="trackWinRate" style="font-size: 20px; font-weight: bold; color: #58d2a3;">0.0%</div>
+                </div>
+                <div>
+                    <div style="font-size: 11px; color: #9aa3b2; text-transform: uppercase;">Strategy Payoff</div>
+                    <div id="trackPayoff" style="font-size: 20px; font-weight: bold; color: #f4f5f7;">+0.0 u</div>
+                </div>
+            </div>
+        </div>
+        <div class="card" style="margin-top: 16px;">
+            <h2 style="margin: 0 0 8px; font-size: 20px;">Model Accuracy Tracker</h2>
+            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 10px;">
+                <div>
+                    <div style="font-size: 11px; color: #9aa3b2; text-transform: uppercase;">Overall Accuracy</div>
+                    <div id="accOverall" style="font-size: 20px; font-weight: bold; color: #f4f5f7;">—</div>
+                </div>
+                <div>
+                    <div style="font-size: 11px; color: #9aa3b2; text-transform: uppercase;">Missed Swings</div>
+                    <div id="accMissed" style="font-size: 20px; font-weight: bold; color: #58d2a3;">0</div>
+                </div>
+                <div>
+                    <div style="font-size: 11px; color: #9aa3b2; text-transform: uppercase;">Correct "Low" Calls</div>
+                    <div id="accLow" style="font-size: 20px; font-weight: bold; color: #58d2a3;">0</div>
+                </div>
+                <div>
+                    <div style="font-size: 11px; color: #9aa3b2; text-transform: uppercase;">Hours Tracked</div>
+                    <div id="accHours" style="font-size: 20px; font-weight: bold; color: #f4f5f7;">0</div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
         const statusEl = document.getElementById("status");
 
-        // Helper function to format ISO strings into MM-DDTHH:MM (Year removed)
         function formatTimestamp(isoString) {
             const date = new Date(isoString);
-            
             const mm = String(date.getMonth() + 1).padStart(2, '0');
             const dd = String(date.getDate()).padStart(2, '0');
             const hh = String(date.getHours()).padStart(2, '0');
             const min = String(date.getMinutes()).padStart(2, '0');
-            
             return `${mm}-${dd}T${hh}:${min}`;
+        }
+
+        async function loadPerformance() {
+            try {
+                const res = await fetch("/api/performance");
+                if (!res.ok) return;
+                const data = await res.json();
+
+                if (data.total_trades !== undefined) {
+                    document.getElementById("trackTrades").textContent = data.total_trades;
+                    document.getElementById("trackWinRate").textContent = `${(data.win_rate * 100).toFixed(1)}%`;
+
+                    const payoffEl = document.getElementById("trackPayoff");
+                    payoffEl.textContent = `${data.cumulative_payoff >= 0 ? '+' : ''}${data.cumulative_payoff.toFixed(1)} u`;
+                    payoffEl.style.color = data.cumulative_payoff >= 0 ? "#58d2a3" : "#ff6b6b";
+                }
+
+                if (data.overall_accuracy !== undefined) {
+                    const accPct = (data.overall_accuracy * 100).toFixed(1);
+                    const accEl = document.getElementById("accOverall");
+                    accEl.textContent = `${accPct}%`;
+                    if (data.overall_accuracy >= 0.55) {
+                        accEl.style.color = "#58d2a3";
+                    } else if (data.overall_accuracy >= 0.50) {
+                        accEl.style.color = "#f0c040";
+                    } else {
+                        accEl.style.color = "#ff6b6b";
+                    }
+
+                    const missedEl = document.getElementById("accMissed");
+                    missedEl.textContent = data.missed_swings;
+                    missedEl.style.color = data.missed_swings > 0 ? "#ff6b6b" : "#58d2a3";
+
+                    document.getElementById("accLow").textContent = data.correct_low_calls;
+                    document.getElementById("accHours").textContent = data.sample_size;
+                }
+            } catch (err) {
+                console.error("Performance tracking error:", err);
+            }
         }
 
         async function loadData() {
@@ -205,7 +450,7 @@ def root() -> HTMLResponse:
         function renderChart(payload) {
             const formattedLabels = payload.timestamps.map(formatTimestamp);
             const ctx = document.getElementById("btcChart").getContext("2d");
-            
+
             if (chartInstance) {
                 chartInstance.data.labels = formattedLabels;
                 chartInstance.data.datasets[0].data = payload.prices;
@@ -216,26 +461,20 @@ def root() -> HTMLResponse:
                 type: "line",
                 data: {
                     labels: formattedLabels,
-                    datasets: [
-                        {
-                            label: "BTC close",
-                            data: payload.prices,
-                            borderColor: "#58d2a3",
-                            backgroundColor: "rgba(88, 210, 163, 0.12)",
-                            tension: 0.3,
-                        },
-                    ],
+                    datasets: [{
+                        label: "BTC close",
+                        data: payload.prices,
+                        borderColor: "#58d2a3",
+                        backgroundColor: "rgba(88, 210, 163, 0.12)",
+                        tension: 0.3,
+                    }],
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
                     scales: {
                         x: {
-                            ticks: { 
-                                color: "#b8c0cc", 
-                                maxTicksLimit: 24
-                                // Removed fixed 90-degree rotations to revert to auto layout
-                            },
+                            ticks: { color: "#b8c0cc", maxTicksLimit: 24 },
                             grid: { color: "rgba(255,255,255,0.05)" },
                         },
                         y: {
@@ -261,14 +500,22 @@ def root() -> HTMLResponse:
 
             try {
                 const volatility = await loadVolatility();
-                const status = document.getElementById("volatilityStatus");
-                const details = document.getElementById("volatilityDetails");
-                status.textContent = `Prediction: ${volatility.prediction.toUpperCase()}`;
-                details.textContent = `Low: ${(volatility.prob_low * 100).toFixed(1)}% | High: ${(volatility.prob_high * 100).toFixed(1)}%`;
+                const vStatusEl = document.getElementById("volatilityStatus");
+                const vDetailsEl = document.getElementById("volatilityDetails");
+
+                if (!volatility || !volatility.prediction || volatility.status === "no_prediction") {
+                    vStatusEl.textContent = "No prediction available yet";
+                    vDetailsEl.textContent = "Waiting for next hourly data...";
+                    return;
+                }
+
+                vStatusEl.textContent = `Prediction: ${volatility.prediction.toUpperCase()}`;
+                vDetailsEl.textContent = `Confidence: ${(volatility.prob_high * 100).toFixed(1)}% | Threshold: ${volatility.threshold}`;
             } catch (err) {
-                const status = document.getElementById("volatilityStatus");
-                status.textContent = `Error: ${err.message}`;
+                document.getElementById("volatilityStatus").textContent = `Error: ${err.message}`;
             }
+
+            await loadPerformance();
         }
 
         function scheduleHourlyRefresh() {
