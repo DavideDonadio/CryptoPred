@@ -261,20 +261,50 @@ def get_performance_metrics():
     if merged.empty:
         return {"msg": "Waiting for ground-truth data to finalize."}
 
-    trades = merged[merged["signal_triggered"] == 1]
-    no_trades = merged[merged["signal_triggered"] == 0]
-    total_trades = len(trades)
+    # Determine which rows represent actual trades (respect confidence threshold)
+    if "traded" in merged.columns:
+        executed = merged[merged["traded"] == True]
+        # "Actionable" = model could have predicted HIGH (prob >= MIN_CONFIDENCE)
+        # below MIN_CONFIDENCE = model abstained, not a miss
+        actionable_mask = merged["prob_high"] >= MIN_CONFIDENCE
+    else:
+        # Legacy predictions without traded column
+        executed = merged[merged["signal_triggered"] == 1]
+        actionable_mask = merged["signal_triggered"] == 1
 
-    tp = int(np.sum((trades["true_target"] == 1))) if total_trades > 0 else 0
-    fp = int(np.sum((trades["true_target"] == 0))) if total_trades > 0 else 0
-    fn = int(np.sum((no_trades["true_target"] == 1)))
-    tn = int(np.sum((no_trades["true_target"] == 0)))
+    no_trade = merged[~merged.index.isin(executed.index)]
+    total_trades = len(executed)
 
-    total_hours = tp + fp + fn + tn
+    tp_mask = executed["true_target"] == 1
+    fp_mask = executed["true_target"] == 0
+    tp = int(tp_mask.sum()) if total_trades > 0 else 0
+    fp = int(fp_mask.sum()) if total_trades > 0 else 0
+
+    # Missed swings: actionable (prob >= 0.70) but model didn't trade, actual was HIGH
+    missed_mask = actionable_mask & ~merged.index.isin(executed.index) & (merged["true_target"] == 1)
+    fn = int(missed_mask.sum())
+
+    # Correct low calls: actual was LOW and either model abstained or correctly said LOW
+    tn_mask = (merged["true_target"] == 0)
+    tn = int(tn_mask.sum())
+
+    total_hours = tp + fp + fn + int(tn_mask.sum())
     overall_accuracy = (tp + tn) / total_hours if total_hours > 0 else 0.0
 
     cfg = PROFILES[ACTIVE_PROFILE]
-    payoff = tp * cfg["gain"] - fp * cfg["cost"] - (tp + fp) * RT_COST if total_trades > 0 else 0.0
+    # Weighted payoff: each trade's contribution scaled by its capital_at_risk
+    if total_trades > 0:
+        if "capital_at_risk" in executed.columns:
+            trade_weights = np.asarray(executed["capital_at_risk"], dtype=float) / TRADE_CAPITAL
+        else:
+            trade_weights = np.ones(total_trades, dtype=float)
+        tp_arr = np.asarray(tp_mask, dtype=bool)
+        fp_arr = np.asarray(fp_mask, dtype=bool)
+        weighted_tp = float(trade_weights[tp_arr].sum()) if tp > 0 else 0.0
+        weighted_fp = float(trade_weights[fp_arr].sum()) if fp > 0 else 0.0
+        payoff = weighted_tp * cfg["gain"] - weighted_fp * cfg["cost"] - total_trades * RT_COST
+    else:
+        payoff = 0.0
     win_rate = tp / total_trades if total_trades > 0 else 0.0
 
     return {
