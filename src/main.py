@@ -29,8 +29,8 @@ FEES = 0.0005
 SLIPPAGE = 0.0005
 RT_COST = 2 * (FEES + SLIPPAGE) * LEVERAGE
 TRADE_CAPITAL = float(os.environ.get("CRYPTOPRED_CAPITAL", "10000"))
-MIN_CONFIDENCE = 0.70
-MIN_POSITION_PCT = 0.50
+MIN_CONFIDENCE = 0.80
+MIN_POSITION_PCT = 0.25
 MAX_POSITION_PCT = 1.00
 
 ACTIVE_PROFILE = os.environ.get("CRYPTOPRED_PROFILE", "Standard")
@@ -264,8 +264,6 @@ def get_performance_metrics():
     # Determine which rows represent actual trades (respect confidence threshold)
     if "traded" in merged.columns:
         executed = merged[merged["traded"] == True]
-        # "Actionable" = model could have predicted HIGH (prob >= MIN_CONFIDENCE)
-        # below MIN_CONFIDENCE = model abstained, not a miss
         actionable_mask = merged["prob_high"] >= MIN_CONFIDENCE
     else:
         # Legacy predictions without traded column
@@ -280,11 +278,9 @@ def get_performance_metrics():
     tp = int(tp_mask.sum()) if total_trades > 0 else 0
     fp = int(fp_mask.sum()) if total_trades > 0 else 0
 
-    # Missed swings: actionable (prob >= 0.70) but model didn't trade, actual was HIGH
     missed_mask = actionable_mask & ~merged.index.isin(executed.index) & (merged["true_target"] == 1)
     fn = int(missed_mask.sum())
 
-    # Correct low calls: actual was LOW and either model abstained or correctly said LOW
     tn_mask = (merged["true_target"] == 0)
     tn = int(tn_mask.sum())
 
@@ -292,7 +288,6 @@ def get_performance_metrics():
     overall_accuracy = (tp + tn) / total_hours if total_hours > 0 else 0.0
 
     cfg = PROFILES[ACTIVE_PROFILE]
-    # Weighted payoff: each trade's contribution scaled by its capital_at_risk
     if total_trades > 0:
         if "capital_at_risk" in executed.columns:
             trade_weights = np.asarray(executed["capital_at_risk"], dtype=float) / TRADE_CAPITAL
@@ -336,12 +331,17 @@ def volatility(limit: int = Query(1, ge=1, le=720)):
                 "prediction": str(latest["prediction"]),
                 "prob_high": float(latest["prob_high"]),
                 "signal_triggered": int(latest["signal_triggered"]),
+                "traded": bool(latest.get("traded", False)),
+                "position_pct": float(latest.get("position_pct", 0.0)),
+                "capital_at_risk": float(latest.get("capital_at_risk", 0.0)),
                 "profile": str(latest["profile_used"]),
                 "threshold": float(latest["threshold_used"]),
+                "trade_capital": TRADE_CAPITAL,
                 "status": "success"
             }
-        res = run_prediction()  # ← was compute_prediction
+        res = run_prediction()
         res["status"] = "success"
+        res["trade_capital"] = TRADE_CAPITAL
         return res
     except Exception as e:
         logger.error("Prediction fallback %s", e)
@@ -349,8 +349,12 @@ def volatility(limit: int = Query(1, ge=1, le=720)):
             "prediction": None,
             "prob_high": None,
             "signal_triggered": None,
+            "traded": False,
+            "position_pct": 0.0,
+            "capital_at_risk": 0.0,
             "profile": ACTIVE_PROFILE,
             "threshold": None,
+            "trade_capital": TRADE_CAPITAL,
             "status": "no_prediction",
         }
 
@@ -362,7 +366,7 @@ async def scheduler():
             next_run += timedelta(hours=1)
         await asyncio.sleep((next_run - now).total_seconds())
         try:
-            backfill_vol_targets()  # ← backfill first
+            backfill_vol_targets()  # backfill first
             run_prediction()
         except Exception as e:
 
@@ -429,6 +433,8 @@ def root() -> HTMLResponse:
             <h2 style="margin: 0 0 8px; font-size: 20px;">Volatility Prediction</h2>
             <div class="status" id="volatilityStatus">Loading...</div>
             <div class="status" id="volatilityDetails"></div>
+            <div class="status" id="positionDetails" style="margin-top: 6px;"></div>
+            <div class="status" id="capitalDisplay" style="margin-top: 4px;"></div>
         </div>
         <div class="card" style="margin-top: 16px;">
             <h2 style="margin: 0 0 8px; font-size: 20px;">Live Strategy Tracker</h2>
@@ -480,45 +486,6 @@ def root() -> HTMLResponse:
             const hh = String(date.getHours()).padStart(2, '0');
             const min = String(date.getMinutes()).padStart(2, '0');
             return `${mm}-${dd}T${hh}:${min}`;
-        }
-
-        async function loadPerformance() {
-            try {
-                const res = await fetch("/api/performance");
-                if (!res.ok) return;
-                const data = await res.json();
-
-                if (data.total_trades !== undefined) {
-                    document.getElementById("trackTrades").textContent = data.total_trades;
-                    document.getElementById("trackWinRate").textContent = `${(data.win_rate * 100).toFixed(1)}%`;
-
-                    const payoffEl = document.getElementById("trackPayoff");
-                    payoffEl.textContent = `${data.cumulative_payoff >= 0 ? '+' : ''}$${data.cumulative_payoff.toFixed(2)}`;
-                    payoffEl.style.color = data.cumulative_payoff >= 0 ? "#58d2a3" : "#ff6b6b";
-                }
-
-                if (data.overall_accuracy !== undefined) {
-                    const accPct = (data.overall_accuracy * 100).toFixed(1);
-                    const accEl = document.getElementById("accOverall");
-                    accEl.textContent = `${accPct}%`;
-                    if (data.overall_accuracy >= 0.55) {
-                        accEl.style.color = "#58d2a3";
-                    } else if (data.overall_accuracy >= 0.50) {
-                        accEl.style.color = "#f0c040";
-                    } else {
-                        accEl.style.color = "#ff6b6b";
-                    }
-
-                    const missedEl = document.getElementById("accMissed");
-                    missedEl.textContent = data.missed_swings;
-                    missedEl.style.color = data.missed_swings > 0 ? "#ff6b6b" : "#58d2a3";
-
-                    document.getElementById("accLow").textContent = data.correct_low_calls;
-                    document.getElementById("accHours").textContent = data.sample_size;
-                }
-            } catch (err) {
-                console.error("Performance tracking error:", err);
-            }
         }
 
         async function loadData() {
@@ -584,36 +551,114 @@ def root() -> HTMLResponse:
         }
 
         async function refreshAll() {
-            try {
-                const payload = await loadData();
-                renderChart(payload);
-                statusEl.textContent = `Loaded ${payload.prices.length} hours.`;
-            } catch (err) {
-                statusEl.textContent = `Error: ${err.message}`;
+            // Fetch all data in parallel
+            const [btcResult, volResult, perfResult] = await Promise.allSettled([
+                loadData(),
+                loadVolatility(),
+                (async () => {
+                    try {
+                        const res = await fetch("/api/performance");
+                        if (!res.ok) return null;
+                        return res.json();
+                    } catch (e) {
+                        console.error("Performance fetch error:", e);
+                        return null;
+                    }
+                })(),
+            ]);
+
+            // --- BTC chart ---
+            if (btcResult.status === "fulfilled") {
+                renderChart(btcResult.value);
+                statusEl.textContent = `Loaded ${btcResult.value.prices.length} hours.`;
+            } else {
+                statusEl.textContent = `Error: ${btcResult.reason?.message || "Unknown error"}`;
             }
 
-            // Volatility prediction — single call, no early return
-            try {
-                const v = await loadVolatility();
-                const vStatusEl  = document.getElementById("volatilityStatus");
-                const vDetailsEl = document.getElementById("volatilityDetails");
-
-                if (!v || v.prediction === null || v.status === "no_prediction") {
-                    vStatusEl.textContent = "No prediction available yet";
-                    vDetailsEl.textContent = "Waiting for next hourly data...";
-                } else {
-                    const predText = v.prediction.toUpperCase();
-                    vStatusEl.textContent = `Prediction: ${predText}`;
-                    vStatusEl.style.color = predText === "HIGH" ? "#ff6b6b" : "#58d2a3";
-                    const confidence = predText === "HIGH" ? v.prob_high : (1 - v.prob_high);
-                    vDetailsEl.textContent =
-                        `Confidence: ${(confidence * 100).toFixed(1)}% | ` +
-                        `Threshold: ${v.threshold} | Profile: ${v.profile}`;
+            // --- Performance tracker cards ---
+            if (perfResult.status === "fulfilled" && perfResult.value) {
+                const data = perfResult.value;
+                if (data.total_trades !== undefined) {
+                    document.getElementById("trackTrades").textContent = data.total_trades;
+                    document.getElementById("trackWinRate").textContent = `${(data.win_rate * 100).toFixed(1)}%`;
+                    const payoffEl = document.getElementById("trackPayoff");
+                    payoffEl.textContent = `${data.cumulative_payoff >= 0 ? '+' : ''}$${data.cumulative_payoff.toFixed(2)}`;
+                    payoffEl.style.color = data.cumulative_payoff >= 0 ? "#58d2a3" : "#ff6b6b";
                 }
-            } catch (err) {
-                document.getElementById("volatilityStatus").textContent = `Error: ${err.message}`;
+                if (data.overall_accuracy !== undefined) {
+                    const accPct = (data.overall_accuracy * 100).toFixed(1);
+                    const accEl = document.getElementById("accOverall");
+                    accEl.textContent = `${accPct}%`;
+                    if (data.overall_accuracy >= 0.55) {
+                        accEl.style.color = "#58d2a3";
+                    } else if (data.overall_accuracy >= 0.50) {
+                        accEl.style.color = "#f0c040";
+                    } else {
+                        accEl.style.color = "#ff6b6b";
+                    }
+                    const missedEl = document.getElementById("accMissed");
+                    missedEl.textContent = data.missed_swings;
+                    missedEl.style.color = data.missed_swings > 0 ? "#ff6b6b" : "#58d2a3";
+                    document.getElementById("accLow").textContent = data.correct_low_calls;
+                    document.getElementById("accHours").textContent = data.sample_size;
+                }
+                window.__lastPerf = data;
+            } else {
+                window.__lastPerf = null;
             }
-            await loadPerformance();
+
+            // --- Volatility prediction ---
+            const vStatusEl  = document.getElementById("volatilityStatus");
+            const vDetailsEl = document.getElementById("volatilityDetails");
+            const posEl = document.getElementById("positionDetails");
+            const capEl = document.getElementById("capitalDisplay");
+
+            if (volResult.status === "rejected") {
+                vStatusEl.textContent = `Error: ${volResult.reason?.message || "Unknown error"}`;
+                vDetailsEl.textContent = "";
+                posEl.textContent = "";
+                capEl.textContent = "";
+                return;
+            }
+
+            const v = volResult.value;
+            const perf = window.__lastPerf;
+
+            if (!v || v.prediction === null || v.status === "no_prediction") {
+                vStatusEl.textContent = "No prediction available yet";
+                vDetailsEl.textContent = "Waiting for next hourly data...";
+                posEl.textContent = "";
+                capEl.textContent = "";
+                return;
+            }
+
+            const predText = v.prediction.toUpperCase();
+            vStatusEl.textContent = `Prediction: ${predText}`;
+            vStatusEl.style.color = predText === "HIGH" ? "#ff6b6b" : "#58d2a3";
+            const confidence = predText === "HIGH" ? v.prob_high : (1 - v.prob_high);
+            vDetailsEl.textContent =
+                `Confidence: ${(confidence * 100).toFixed(1)}% | ` +
+                `Threshold: ${v.threshold} | Profile: ${v.profile}`;
+
+            // Total equity = initial capital + cumulative realized P&L
+            const totalEquity = v.trade_capital + (perf ? perf.cumulative_payoff : 0);
+            const availableCapital = v.traded ? totalEquity - v.capital_at_risk : totalEquity;
+
+            capEl.textContent =
+                `Equity: $${totalEquity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}  |  ` +
+                `Available: $${availableCapital.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+            capEl.style.color = "#9aa3b2";
+
+            if (v.traded) {
+                posEl.textContent = `Current Position: $${v.capital_at_risk.toFixed(0)} (${(v.position_pct * 100).toFixed(0)}% of initial capital)`;
+                posEl.style.color = "#58d2a3";
+            } else if (predText === "HIGH") {
+                posEl.textContent = `No trade — confidence below 70% minimum (needs ${((0.70 - v.prob_high) * 100).toFixed(1)}% more)`;
+                posEl.style.color = "#f0c040";
+            } else {
+                posEl.textContent = "No position — prediction is LOW";
+                posEl.style.color = "#58d2a3";
+            }
         }
         
 
