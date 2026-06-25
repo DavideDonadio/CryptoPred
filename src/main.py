@@ -28,6 +28,10 @@ LEVERAGE = 3
 FEES = 0.0005
 SLIPPAGE = 0.0005
 RT_COST = 2 * (FEES + SLIPPAGE) * LEVERAGE
+TRADE_CAPITAL = float(os.environ.get("CRYPTOPRED_CAPITAL", "10000"))
+MIN_CONFIDENCE = 0.70
+MIN_POSITION_PCT = 0.50
+MAX_POSITION_PCT = 1.00
 
 ACTIVE_PROFILE = os.environ.get("CRYPTOPRED_PROFILE", "Standard")
 if ACTIVE_PROFILE not in PROFILES:
@@ -36,6 +40,11 @@ if ACTIVE_PROFILE not in PROFILES:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:
+        backfill_vol_targets()
+        logger.info("[startup] initial backfill complete")
+    except Exception as e:
+        logger.error("[startup] backfill failed: %s", e)
     asyncio.create_task(scheduler())
     yield
 
@@ -70,27 +79,25 @@ def safe_read_csv(path: str, **kwargs) -> pd.DataFrame:
     except pd.errors.EmptyDataError:
         return pd.DataFrame()
 
-def _write_prediction(pred_row: pd.DataFrame) -> None:
+def write_prediction(pred_row: pd.DataFrame) -> None:
     df = safe_read_csv(PREDICTIONS)
 
     if df.empty or "timestamp" not in df.columns:
         pred_row.to_csv(PREDICTIONS, index=False)
         return
 
-    if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     new_ts = pd.to_datetime(pred_row["timestamp"].iloc[0], utc=True)
 
     if new_ts not in df["timestamp"].values:
         pred_row.to_csv(PREDICTIONS, mode="a", header=False, index=False)
 
-def run_prediction():
+def compute_prediction() -> dict:
     lgb_path = model_path("lgb")
     if not os.path.exists(lgb_path):
         raise RuntimeError(f"Model file not found: {lgb_path}")
 
     row = load_last_live_data_row()
-    timestamp = pd.to_datetime(row.index[0]).isoformat()
     to_drop_cols = ["BTC_vol_target", "ETH_vol_target", "SOL_vol_target"]
     features = row.drop(columns=to_drop_cols, errors="ignore")
 
@@ -99,41 +106,56 @@ def run_prediction():
         logger.warning("Feature columns with NaN values (filling with 0): %s", nan_cols)
 
     features = features.fillna(0)
-
     lgb = pickle.load(open(lgb_path, "rb"))
 
     if hasattr(lgb, "feature_names_in_"):
         features = features[lgb.feature_names_in_]
     elif hasattr(lgb, "feature_name_"):
         features = features[lgb.feature_name_]
-    _, lgb_high = lgb.predict_proba(features)[0]
 
+    _, lgb_high = lgb.predict_proba(features)[0]
     thresholds = load_threshold_from_json()
     current_threshold = thresholds.get("lgb", 0.50)
-
     signal = 1 if lgb_high > current_threshold else 0
-    prediction = "high" if signal == 1 else "low"
 
-    pred_row = pd.DataFrame([{
-        "timestamp": timestamp,
-        "prediction": prediction,
-        "prob_high": lgb_high,
-        "signal_triggered": signal,
-        "profile_used": ACTIVE_PROFILE,
-        "threshold_used": current_threshold,
-    }])
-
-    _write_prediction(pred_row)
+    traded = signal == 1 and lgb_high >= MIN_CONFIDENCE
+    if traded:
+        fraction = (lgb_high - MIN_CONFIDENCE) / (1.0 - MIN_CONFIDENCE)
+        position_pct = MIN_POSITION_PCT + fraction * (MAX_POSITION_PCT - MIN_POSITION_PCT)
+        capital_at_risk = TRADE_CAPITAL * position_pct
+    else:
+        position_pct = 0.0
+        capital_at_risk = 0.0
 
     return {
-        "prediction": prediction,
+        "prediction": "high" if signal == 1 else "low",
         "prob_high": lgb_high,
         "signal_triggered": signal,
+        "traded": traded,
+        "position_pct": position_pct,
+        "capital_at_risk": capital_at_risk,
         "profile": ACTIVE_PROFILE,
         "threshold": current_threshold,
+        "timestamp": pd.to_datetime(row.index[0]).isoformat(),
     }
 
-def compute_prediction() -> dict:
+def run_prediction() -> dict:
+    result = compute_prediction()
+    pred_row = pd.DataFrame([{
+        "timestamp": result["timestamp"],
+        "prediction": result["prediction"],
+        "prob_high": result["prob_high"],
+        "signal_triggered": result["signal_triggered"],
+        "traded": result["traded"],
+        "position_pct": result["position_pct"],
+        "capital_at_risk": result["capital_at_risk"],
+        "profile_used": ACTIVE_PROFILE,
+        "threshold_used": result["threshold"],
+    }])
+    write_prediction(pred_row)
+    return result
+
+def prediction() -> dict:
     lgb_path = model_path("lgb")
     if not os.path.exists(lgb_path):
         raise RuntimeError(f"Model file not found: {lgb_path}")
@@ -178,6 +200,32 @@ def _load_live_data(limit: int | None = None) -> pd.DataFrame:
     if limit is not None:
         return df.tail(limit)
     return df
+
+def backfill_vol_targets() -> None:
+    df = safe_read_csv(LIVE_DATA_PATH, index_col=0)
+    if df.empty:
+        return
+
+    df["BTC_vol_target"] = pd.cut(
+        df["BTC-USD_volatility"],
+        bins=[-np.inf, 0.00638, 0.01069, np.inf],
+        labels=[0, 1, 2]
+    ).shift(-1)
+
+    df["ETH_vol_target"] = pd.cut(
+        df["ETH-USD_volatility"],
+        bins=[-np.inf, 0.00867, 0.01427, np.inf],
+        labels=[0, 1, 2]
+    ).shift(-1)
+
+    df["SOL_vol_target"] = pd.cut(
+        df["SOL-USD_volatility"],
+        bins=[-np.inf, 0.01205, 0.01960, np.inf],
+        labels=[0, 1, 2]
+    ).shift(-1)
+
+    df.to_csv(LIVE_DATA_PATH)
+    logger.info("[backfill] vol targets updated")
 
 def load_btc_price_series(limit: int) -> pd.DataFrame:
     return _load_live_data(limit)
@@ -232,7 +280,8 @@ def get_performance_metrics():
     return {
         "total_trades": total_trades,
         "win_rate": float(win_rate),
-        "cumulative_payoff": float(payoff),
+        "cumulative_payoff": float(payoff) * TRADE_CAPITAL,
+        "trade_capital": TRADE_CAPITAL,
         "sample_size": total_hours,
         "missed_swings": int(fn),
         "correct_low_calls": int(tn),
@@ -250,9 +299,22 @@ def btc_price(limit: int = Query(12, ge=1, le=720)):
 @app.get("/api/volatility")
 def volatility(limit: int = Query(1, ge=1, le=720)):
     try:
-        return compute_prediction()
+        preds_df = safe_read_csv(PREDICTIONS)
+        if not preds_df.empty:
+            latest = preds_df.iloc[-1]
+            return {
+                "prediction": str(latest["prediction"]),
+                "prob_high": float(latest["prob_high"]),
+                "signal_triggered": int(latest["signal_triggered"]),
+                "profile": str(latest["profile_used"]),
+                "threshold": float(latest["threshold_used"]),
+                "status": "success"
+            }
+        res = run_prediction()  # ← was compute_prediction
+        res["status"] = "success"
+        return res
     except Exception as e:
-        logger.error("Prediction fallback active due to: %s", e)
+        logger.error("Prediction fallback %s", e)
         return {
             "prediction": None,
             "prob_high": None,
@@ -270,9 +332,11 @@ async def scheduler():
             next_run += timedelta(hours=1)
         await asyncio.sleep((next_run - now).total_seconds())
         try:
+            backfill_vol_targets()  # ← backfill first
             run_prediction()
         except Exception as e:
-            logger.error("[scheduler] run_prediction failed: %s", e)
+
+            logger.error("[scheduler] failed: %s", e)
 
 @app.get("/", response_class=HTMLResponse)
 def root() -> HTMLResponse:
@@ -349,7 +413,7 @@ def root() -> HTMLResponse:
                 </div>
                 <div>
                     <div style="font-size: 11px; color: #9aa3b2; text-transform: uppercase;">Strategy Payoff</div>
-                    <div id="trackPayoff" style="font-size: 20px; font-weight: bold; color: #f4f5f7;">+0.0 u</div>
+                    <div id="trackPayoff" style="font-size: 20px; font-weight: bold; color: #f4f5f7;">+$0.00</div>
                 </div>
             </div>
         </div>
@@ -399,7 +463,7 @@ def root() -> HTMLResponse:
                     document.getElementById("trackWinRate").textContent = `${(data.win_rate * 100).toFixed(1)}%`;
 
                     const payoffEl = document.getElementById("trackPayoff");
-                    payoffEl.textContent = `${data.cumulative_payoff >= 0 ? '+' : ''}${data.cumulative_payoff.toFixed(1)} u`;
+                    payoffEl.textContent = `${data.cumulative_payoff >= 0 ? '+' : ''}$${data.cumulative_payoff.toFixed(2)}`;
                     payoffEl.style.color = data.cumulative_payoff >= 0 ? "#58d2a3" : "#ff6b6b";
                 }
 
@@ -498,25 +562,30 @@ def root() -> HTMLResponse:
                 statusEl.textContent = `Error: ${err.message}`;
             }
 
+            // Volatility prediction — single call, no early return
             try {
-                const volatility = await loadVolatility();
-                const vStatusEl = document.getElementById("volatilityStatus");
+                const v = await loadVolatility();
+                const vStatusEl  = document.getElementById("volatilityStatus");
                 const vDetailsEl = document.getElementById("volatilityDetails");
 
-                if (!volatility || !volatility.prediction || volatility.status === "no_prediction") {
+                if (!v || v.prediction === null || v.status === "no_prediction") {
                     vStatusEl.textContent = "No prediction available yet";
                     vDetailsEl.textContent = "Waiting for next hourly data...";
-                    return;
+                } else {
+                    const predText = v.prediction.toUpperCase();
+                    vStatusEl.textContent = `Prediction: ${predText}`;
+                    vStatusEl.style.color = predText === "HIGH" ? "#ff6b6b" : "#58d2a3";
+                    const confidence = predText === "HIGH" ? v.prob_high : (1 - v.prob_high);
+                    vDetailsEl.textContent =
+                        `Confidence: ${(confidence * 100).toFixed(1)}% | ` +
+                        `Threshold: ${v.threshold} | Profile: ${v.profile}`;
                 }
-
-                vStatusEl.textContent = `Prediction: ${volatility.prediction.toUpperCase()}`;
-                vDetailsEl.textContent = `Confidence: ${(volatility.prob_high * 100).toFixed(1)}% | Threshold: ${volatility.threshold}`;
             } catch (err) {
                 document.getElementById("volatilityStatus").textContent = `Error: ${err.message}`;
             }
-
             await loadPerformance();
         }
+        
 
         function scheduleHourlyRefresh() {
             const now = new Date();

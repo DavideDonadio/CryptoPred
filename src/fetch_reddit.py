@@ -22,7 +22,7 @@ driver = uc.Chrome(options=options, version_main=149)
 try:
     print("Priming browser cookies on Reddit homepage...")
     driver.get("https://www.reddit.com")
-    time.sleep(5)  
+    time.sleep(2)  
     
     for sub in SUBREDDITS:
         url = f"https://www.reddit.com/r/{sub}/new.json?limit=25"
@@ -30,11 +30,11 @@ try:
         
         print(f"Navigating to r/{sub} feed...")
         driver.get(f"https://www.reddit.com/r/{sub}/new")
-        time.sleep(4)  
+        time.sleep(2)  
         
         print(f"Extracting JSON source payload...")
         driver.get(url)
-        time.sleep(3)
+        time.sleep(2)
         
         raw_text = driver.find_element("xpath", "//html").text
         
@@ -46,7 +46,7 @@ try:
         except json.JSONDecodeError:
             print(f"Error: Blocked on r/{sub}. Page snippet: {raw_text[:200]}")
             
-        time.sleep(4)
+        time.sleep(2)
 
 finally:
     driver.quit()
