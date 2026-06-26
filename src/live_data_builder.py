@@ -258,28 +258,40 @@ def main():
         print("No complete rows after feature engineering, stopping.")
         return
     
-    latest_completed_row = df_final.iloc[[-1]].copy()
-    latest_completed_row.index.name = "index"
-    latest_ts = latest_completed_row.index[0]
-    
+    completed_hour = pd.Timestamp(now).floor("h") - pd.Timedelta(hours=1)
+    df_final = df_final[df_final.index <= completed_hour]
+    print(f"Truncated to completed hour {completed_hour}: {len(df_final)} rows remain")
+
+    if df_final.empty:
+        print("No completed rows after truncation, stopping.")
+        return
+
     csv_path = "data/clean_reddit/live_data.csv"
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-
+    df_final.index.name = "index"
+    
     if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
-        latest_completed_row.to_csv(csv_path, index=True)
-        print("Created new CSV file (or overwrote empty file)")
+        df_final.to_csv(csv_path, index=True)
+        print(f"Created new CSV file with {len(df_final)} rows")
     else:
         try:
             existing = pd.read_csv(csv_path, index_col=0)
             existing.index = pd.to_datetime(existing.index, utc=True, errors="coerce")
+
+            df_with_posts = df_final[df_final["total_post_count"] > 0]
+            if df_with_posts.empty:
+                print("No rows with posts, skipping.")
+                return
+            latest_completed_row = df_with_posts.iloc[[-1]].copy()
+            latest_ts = latest_completed_row.index[0]
             if latest_ts in existing.index:
                 print(f"Latest hour {latest_ts} already exists, skipping append.")
                 return
             latest_completed_row.to_csv(csv_path, mode='a', header=False, index=True)
             print("Successfully appended new hourly data.")
         except pd.errors.EmptyDataError:
-            latest_completed_row.to_csv(csv_path, index=True)
-            print("Caught EmptyDataError: Overwrote empty file with fresh data.")
+            df_final.to_csv(csv_path, index=True)
+            print("Overwrote empty file with fresh data.")
 
 if __name__ == "__main__":
     main()
