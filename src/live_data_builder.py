@@ -277,13 +277,9 @@ def main():
         try:
             existing = pd.read_csv(csv_path, index_col=0)
             existing.index = pd.to_datetime(existing.index, utc=True, errors="coerce")
-
-            df_with_posts = df_final[df_final["total_post_count"] > 0]
-            if df_with_posts.empty:
-                print("No rows with posts, skipping.")
-                return
-            latest_completed_row = df_with_posts.iloc[[-1]].copy()
+            latest_completed_row = df_final.iloc[[-1]].copy()
             latest_ts = latest_completed_row.index[0]
+            
             if latest_ts in existing.index:
                 print(f"Latest hour {latest_ts} already exists, skipping append.")
                 return

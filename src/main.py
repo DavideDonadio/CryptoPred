@@ -13,30 +13,11 @@ from datetime import datetime, timezone, timedelta
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("cryptopred")
 
-PROFILES = {
-    "Conservative": {"gain": 0.030, "cost": 0.010},
-    "Standard":     {"gain": 0.060, "cost": 0.020},
-    "Aggressive":   {"gain": 0.105, "cost": 0.035},
-}
-
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 LIVE_DATA_PATH = os.path.join(BASE_DIR, "data", "clean_reddit", "live_data.csv")
 PREDICTIONS = os.path.join(BASE_DIR, "data", "clean_reddit", "predictions.csv")
 THRESHOLDS_JSON = os.path.join(BASE_DIR, "data", "models", "optimal_thresholds.json")
-
-LEVERAGE = 3
-FEES = 0.0005
-SLIPPAGE = 0.0005
-RT_COST = 2 * (FEES + SLIPPAGE) * LEVERAGE
-TRADE_CAPITAL = float(os.environ.get("CRYPTOPRED_CAPITAL", "10000"))
-MIN_CONFIDENCE = 0.80
-MIN_POSITION_PCT = 0.25
-MAX_POSITION_PCT = 1.00
-
-ACTIVE_PROFILE = os.environ.get("CRYPTOPRED_PROFILE", "Standard")
-if ACTIVE_PROFILE not in PROFILES:
-    logger.warning("Unknown profile '%s' — falling back to Standard", ACTIVE_PROFILE)
-    ACTIVE_PROFILE = "Standard"
+MODEL_PATH = os.path.join(BASE_DIR, "data", "models", "lgb_volatility.pkl")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -50,26 +31,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-def model_path(model_type: str) -> str:
-    return os.path.join(BASE_DIR, "data", "models", f"{model_type}_{ACTIVE_PROFILE.lower()}.pkl")
-
-def load_threshold_from_json() -> dict[str, float]:
-    default = {"lgb": 0.50}
+def load_threshold_from_json() -> float:
+    default = 0.50
     if not os.path.exists(THRESHOLDS_JSON):
-        logger.warning("%s not found. Using default 0.50.", THRESHOLDS_JSON)
+        logger.warning("%s not found. Using default %.2f.", THRESHOLDS_JSON, default)
         return default
     try:
         with open(THRESHOLDS_JSON, "r") as f:
             data = json.load(f)
-    except (json.JSONDecodeError, IOError):
-        logger.warning("Could not parse %s. Using default 0.50.", THRESHOLDS_JSON)
+        return float(data.get("lgb", default))
+    except (json.JSONDecodeError, IOError, ValueError):
+        logger.warning("Could not parse %s. Using default %.2f.", THRESHOLDS_JSON, default)
         return default
-
-    profile_data = data.get(ACTIVE_PROFILE, {})
-    if not profile_data:
-        logger.warning("Profile '%s' not found in JSON. Using default 0.50.", ACTIVE_PROFILE)
-        return default
-    return profile_data
 
 def safe_read_csv(path: str, **kwargs) -> pd.DataFrame:
     if not os.path.exists(path) or os.path.getsize(path) == 0:
@@ -83,19 +56,18 @@ def write_prediction(pred_row: pd.DataFrame) -> None:
     df = safe_read_csv(PREDICTIONS)
 
     if df.empty or "timestamp" not in df.columns:
-        pred_row.to_csv(PREDICTIONS, index=False)
+        pred_row.to_csv(PREDICTIONS, index=False, date_format="%Y-%m-%d %H:%M:%S%z")
         return
 
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     new_ts = pd.to_datetime(pred_row["timestamp"].iloc[0], utc=True)
 
     if new_ts not in df["timestamp"].values:
-        pred_row.to_csv(PREDICTIONS, mode="a", header=False, index=False)
+        pred_row.to_csv(PREDICTIONS, mode="a", header=False, index=False, date_format="%Y-%m-%d %H:%M:%S%z")
 
 def compute_prediction() -> dict:
-    lgb_path = model_path("lgb")
-    if not os.path.exists(lgb_path):
-        raise RuntimeError(f"Model file not found: {lgb_path}")
+    if not os.path.exists(MODEL_PATH):
+        raise RuntimeError(f"Model file not found: {MODEL_PATH}")
 
     row = load_last_live_data_row()
     to_drop_cols = ["BTC_vol_target", "ETH_vol_target", "SOL_vol_target"]
@@ -106,7 +78,7 @@ def compute_prediction() -> dict:
         logger.warning("Feature columns with NaN values (filling with 0): %s", nan_cols)
 
     features = features.fillna(0)
-    lgb = pickle.load(open(lgb_path, "rb"))
+    lgb = pickle.load(open(MODEL_PATH, "rb"))
 
     if hasattr(lgb, "feature_names_in_"):
         features = features[lgb.feature_names_in_]
@@ -114,29 +86,15 @@ def compute_prediction() -> dict:
         features = features[lgb.feature_name_]
 
     _, lgb_high = lgb.predict_proba(features)[0]
-    thresholds = load_threshold_from_json()
-    current_threshold = thresholds.get("lgb", 0.50)
-    signal = 1 if lgb_high > current_threshold else 0
-
-    traded = signal == 1 and lgb_high >= MIN_CONFIDENCE
-    if traded:
-        fraction = (lgb_high - MIN_CONFIDENCE) / (1.0 - MIN_CONFIDENCE)
-        position_pct = MIN_POSITION_PCT + fraction * (MAX_POSITION_PCT - MIN_POSITION_PCT)
-        capital_at_risk = TRADE_CAPITAL * position_pct
-    else:
-        position_pct = 0.0
-        capital_at_risk = 0.0
+    current_threshold = load_threshold_from_json()
+    signal = 1 if lgb_high >= current_threshold else 0
 
     return {
         "prediction": "high" if signal == 1 else "low",
         "prob_high": lgb_high,
         "signal_triggered": signal,
-        "traded": traded,
-        "position_pct": position_pct,
-        "capital_at_risk": capital_at_risk,
-        "profile": ACTIVE_PROFILE,
         "threshold": current_threshold,
-        "timestamp": pd.to_datetime(row.index[0]).isoformat(),
+        "timestamp": pd.to_datetime(row.index[0], utc=True),
     }
 
 def run_prediction() -> dict:
@@ -146,50 +104,10 @@ def run_prediction() -> dict:
         "prediction": result["prediction"],
         "prob_high": result["prob_high"],
         "signal_triggered": result["signal_triggered"],
-        "traded": result["traded"],
-        "position_pct": result["position_pct"],
-        "capital_at_risk": result["capital_at_risk"],
-        "profile_used": ACTIVE_PROFILE,
         "threshold_used": result["threshold"],
     }])
     write_prediction(pred_row)
     return result
-
-def prediction() -> dict:
-    lgb_path = model_path("lgb")
-    if not os.path.exists(lgb_path):
-        raise RuntimeError(f"Model file not found: {lgb_path}")
-
-    row = load_last_live_data_row()
-    to_drop_cols = ["BTC_vol_target", "ETH_vol_target", "SOL_vol_target"]
-    features = row.drop(columns=to_drop_cols, errors="ignore")
-
-    nan_cols = features.columns[features.isna().any()].tolist()
-    if nan_cols:
-        logger.warning("Feature columns with NaN values (filling with 0): %s", nan_cols)
-
-    features = features.fillna(0)
-
-    lgb = pickle.load(open(lgb_path, "rb"))
-    if hasattr(lgb, "feature_names_in_"):
-        features = features[lgb.feature_names_in_]
-    elif hasattr(lgb, "feature_name_"):
-        features = features[lgb.feature_name_]
-    _, lgb_high = lgb.predict_proba(features)[0]
-
-    thresholds = load_threshold_from_json()
-    current_threshold = thresholds.get("lgb", 0.50)
-
-    signal = 1 if lgb_high > current_threshold else 0
-    prediction = "high" if signal == 1 else "low"
-
-    return {
-        "prediction": prediction,
-        "prob_high": lgb_high,
-        "signal_triggered": signal,
-        "profile": ACTIVE_PROFILE,
-        "threshold": current_threshold,
-    }
 
 def _load_live_data(limit: int | None = None) -> pd.DataFrame:
     df = safe_read_csv(LIVE_DATA_PATH, index_col=0)
@@ -238,9 +156,6 @@ def get_performance_metrics():
     preds_df = safe_read_csv(PREDICTIONS)
     live_df = safe_read_csv(LIVE_DATA_PATH, index_col=0)
 
-    if not preds_df.empty and "profile_used" in preds_df.columns:
-        preds_df = preds_df[preds_df["profile_used"] == ACTIVE_PROFILE]
-
     if preds_df.empty or live_df.empty:
         return {"msg": "No historical tracking data available yet."}
 
@@ -255,70 +170,44 @@ def get_performance_metrics():
         return {"msg": "Waiting for ground-truth data to finalize."}
 
     live_df["true_target"] = (live_df["BTC_vol_target"].astype(float) == 2.0).astype(int)
-
     merged = pd.merge(preds_df, live_df[["true_target"]], left_on="timestamp", right_index=True, how="inner")
 
     if merged.empty:
         return {"msg": "Waiting for ground-truth data to finalize."}
 
-    # Determine which rows represent actual trades (respect confidence threshold)
-    if "traded" in merged.columns:
-        executed = merged[merged["traded"] == True]
-        actionable_mask = merged["prob_high"] >= MIN_CONFIDENCE
-    else:
-        # Legacy predictions without traded column
-        executed = merged[merged["signal_triggered"] == 1]
-        actionable_mask = merged["signal_triggered"] == 1
+    preds = merged["signal_triggered"].astype(int)
+    trues = merged["true_target"].astype(int)
 
-    no_trade = merged[~merged.index.isin(executed.index)]
-    total_trades = len(executed)
+    tp = int(((preds == 1) & (trues == 1)).sum())
+    fp = int(((preds == 1) & (trues == 0)).sum())
+    tn = int(((preds == 0) & (trues == 0)).sum())
+    fn = int(((preds == 0) & (trues == 1)).sum())
 
-    tp_mask = executed["true_target"] == 1
-    fp_mask = executed["true_target"] == 0
-    tp = int(tp_mask.sum()) if total_trades > 0 else 0
-    fp = int(fp_mask.sum()) if total_trades > 0 else 0
-
-    missed_mask = actionable_mask & ~merged.index.isin(executed.index) & (merged["true_target"] == 1)
-    fn = int(missed_mask.sum())
-
-    tn_mask = (merged["true_target"] == 0)
-    tn = int(tn_mask.sum())
-
-    total_hours = tp + fp + fn + int(tn_mask.sum())
-    overall_accuracy = (tp + tn) / total_hours if total_hours > 0 else 0.0
-
-    cfg = PROFILES[ACTIVE_PROFILE]
-    if total_trades > 0:
-        if "capital_at_risk" in executed.columns:
-            trade_weights = np.asarray(executed["capital_at_risk"], dtype=float) / TRADE_CAPITAL
-        else:
-            trade_weights = np.ones(total_trades, dtype=float)
-        tp_arr = np.asarray(tp_mask, dtype=bool)
-        fp_arr = np.asarray(fp_mask, dtype=bool)
-        weighted_tp = float(trade_weights[tp_arr].sum()) if tp > 0 else 0.0
-        weighted_fp = float(trade_weights[fp_arr].sum()) if fp > 0 else 0.0
-        payoff = weighted_tp * cfg["gain"] - weighted_fp * cfg["cost"] - total_trades * RT_COST
-    else:
-        payoff = 0.0
-    win_rate = tp / total_trades if total_trades > 0 else 0.0
+    total_tracked = tp + fp + tn + fn
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+    accuracy = (tp + tn) / total_tracked if total_tracked > 0 else 0.0
 
     return {
-        "total_trades": total_trades,
-        "win_rate": float(win_rate),
-        "cumulative_payoff": float(payoff) * TRADE_CAPITAL,
-        "trade_capital": TRADE_CAPITAL,
-        "sample_size": total_hours,
-        "missed_swings": int(fn),
-        "correct_low_calls": int(tn),
-        "overall_accuracy": float(overall_accuracy),
+        "status": "success",
+        "total_tracked": total_tracked,
+        "tp": tp,
+        "fp": fp,
+        "tn": tn,
+        "fn": fn,
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "accuracy": float(accuracy),
     }
 
 @app.get("/api/btc-price")
 def btc_price(limit: int = Query(12, ge=1, le=720)):
     df = load_btc_price_series(limit)
     return {
-            "timestamps": [ts.isoformat() for ts in df.index],
-            "prices": [float(val) for val in df["BTC-USD_close"].tolist()],
+        "timestamps": [ts.isoformat() for ts in df.index],
+        "prices": [float(val) for val in df["BTC-USD_close"].tolist()],
     }
 
 @app.get("/api/volatility")
@@ -331,17 +220,11 @@ def volatility(limit: int = Query(1, ge=1, le=720)):
                 "prediction": str(latest["prediction"]),
                 "prob_high": float(latest["prob_high"]),
                 "signal_triggered": int(latest["signal_triggered"]),
-                "traded": bool(latest.get("traded", False)),
-                "position_pct": float(latest.get("position_pct", 0.0)),
-                "capital_at_risk": float(latest.get("capital_at_risk", 0.0)),
-                "profile": str(latest["profile_used"]),
                 "threshold": float(latest["threshold_used"]),
-                "trade_capital": TRADE_CAPITAL,
                 "status": "success"
             }
         res = run_prediction()
         res["status"] = "success"
-        res["trade_capital"] = TRADE_CAPITAL
         return res
     except Exception as e:
         logger.error("Prediction fallback %s", e)
@@ -349,27 +232,21 @@ def volatility(limit: int = Query(1, ge=1, le=720)):
             "prediction": None,
             "prob_high": None,
             "signal_triggered": None,
-            "traded": False,
-            "position_pct": 0.0,
-            "capital_at_risk": 0.0,
-            "profile": ACTIVE_PROFILE,
             "threshold": None,
-            "trade_capital": TRADE_CAPITAL,
             "status": "no_prediction",
         }
 
 async def scheduler():
     while True:
         now = datetime.now(timezone.utc)
-        next_run = now.replace(minute=2, second=0, microsecond=0)
+        next_run = now.replace(minute=4, second=10, microsecond=0)
         if next_run <= now:
             next_run += timedelta(hours=1)
         await asyncio.sleep((next_run - now).total_seconds())
         try:
-            backfill_vol_targets()  # backfill first
+            backfill_vol_targets() 
             run_prediction()
         except Exception as e:
-
             logger.error("[scheduler] failed: %s", e)
 
 @app.get("/", response_class=HTMLResponse)
@@ -417,62 +294,82 @@ def root() -> HTMLResponse:
             font-size: 13px;
             color: #9aa3b2;
         }
+        .grid-4 {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            margin-top: 10px;
+        }
+        .metric-label {
+            font-size: 11px;
+            color: #9aa3b2;
+            text-transform: uppercase;
+        }
+        .metric-value {
+            font-size: 20px;
+            font-weight: bold;
+            color: #f4f5f7;
+        }
     </style>
 </head>
 <body>
     <div class="page">
-        <h1>BTC Hourly Price</h1>
-        <p>Latest hourly close from the live data feed.</p>
+        <h1>BTC Volatility Monitor</h1>
+        <p>Real-time ML pipeline evaluation for high-volatility breakouts.</p>
         <div class="card">
             <div class="chart-wrap">
                 <canvas id="btcChart"></canvas>
             </div>
             <div class="status" id="status"></div>
         </div>
+
         <div class="card" style="margin-top: 16px;">
-            <h2 style="margin: 0 0 8px; font-size: 20px;">Volatility Prediction</h2>
+            <h2 style="margin: 0 0 8px; font-size: 20px;">Current Prediction</h2>
             <div class="status" id="volatilityStatus">Loading...</div>
             <div class="status" id="volatilityDetails"></div>
-            <div class="status" id="positionDetails" style="margin-top: 6px;"></div>
-            <div class="status" id="capitalDisplay" style="margin-top: 4px;"></div>
         </div>
+
         <div class="card" style="margin-top: 16px;">
-            <h2 style="margin: 0 0 8px; font-size: 20px;">Live Strategy Tracker</h2>
-            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 10px;">
+            <h2 style="margin: 0 0 8px; font-size: 20px;">Live Model Diagnostics</h2>
+            
+            <div class="grid-4" style="margin-bottom: 20px;">
                 <div>
-                    <div style="font-size: 11px; color: #9aa3b2; text-transform: uppercase;">Trades Taken</div>
-                    <div id="trackTrades" style="font-size: 20px; font-weight: bold; color: #f4f5f7;">0</div>
+                    <div class="metric-label">F1 Score</div>
+                    <div class="metric-value" id="trackF1">—</div>
                 </div>
                 <div>
-                    <div style="font-size: 11px; color: #9aa3b2; text-transform: uppercase;">Realized Win Rate</div>
-                    <div id="trackWinRate" style="font-size: 20px; font-weight: bold; color: #58d2a3;">0.0%</div>
+                    <div class="metric-label">Precision</div>
+                    <div class="metric-value" id="trackPrecision">—</div>
                 </div>
                 <div>
-                    <div style="font-size: 11px; color: #9aa3b2; text-transform: uppercase;">Strategy Payoff</div>
-                    <div id="trackPayoff" style="font-size: 20px; font-weight: bold; color: #f4f5f7;">+$0.00</div>
+                    <div class="metric-label">Recall</div>
+                    <div class="metric-value" id="trackRecall">—</div>
+                </div>
+                <div>
+                    <div class="metric-label">Accuracy</div>
+                    <div class="metric-value" id="trackAccuracy">—</div>
                 </div>
             </div>
-        </div>
-        <div class="card" style="margin-top: 16px;">
-            <h2 style="margin: 0 0 8px; font-size: 20px;">Model Accuracy Tracker</h2>
-            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 10px;">
+
+            <div class="grid-4">
                 <div>
-                    <div style="font-size: 11px; color: #9aa3b2; text-transform: uppercase;">Overall Accuracy</div>
-                    <div id="accOverall" style="font-size: 20px; font-weight: bold; color: #f4f5f7;">—</div>
+                    <div class="metric-label">True Positives (Spike caught)</div>
+                    <div class="metric-value" id="trackTP" style="color: #58d2a3;">0</div>
                 </div>
                 <div>
-                    <div style="font-size: 11px; color: #9aa3b2; text-transform: uppercase;">Missed Swings</div>
-                    <div id="accMissed" style="font-size: 20px; font-weight: bold; color: #58d2a3;">0</div>
+                    <div class="metric-label">False Positives (False Alarm)</div>
+                    <div class="metric-value" id="trackFP" style="color: #ff6b6b;">0</div>
                 </div>
                 <div>
-                    <div style="font-size: 11px; color: #9aa3b2; text-transform: uppercase;">Correct "Low" Calls</div>
-                    <div id="accLow" style="font-size: 20px; font-weight: bold; color: #58d2a3;">0</div>
+                    <div class="metric-label">True Negatives (Quiet Market)</div>
+                    <div class="metric-value" id="trackTN" style="color: #58d2a3;">0</div>
                 </div>
                 <div>
-                    <div style="font-size: 11px; color: #9aa3b2; text-transform: uppercase;">Hours Tracked</div>
-                    <div id="accHours" style="font-size: 20px; font-weight: bold; color: #f4f5f7;">0</div>
+                    <div class="metric-label">False Negatives (Missed Spike)</div>
+                    <div class="metric-value" id="trackFN" style="color: #ff6b6b;">0</div>
                 </div>
             </div>
+            <div class="status" id="accHours" style="margin-top: 16px;">Hours Tracked: 0</div>
         </div>
     </div>
 
@@ -490,19 +387,13 @@ def root() -> HTMLResponse:
 
         async function loadData() {
             const res = await fetch("/api/btc-price?limit=24");
-            if (!res.ok) {
-                const text = await res.text();
-                throw new Error(text || "Failed to load data");
-            }
+            if (!res.ok) throw new Error(await res.text() || "Failed to load data");
             return res.json();
         }
 
         async function loadVolatility() {
             const res = await fetch("/api/volatility");
-            if (!res.ok) {
-                const text = await res.text();
-                throw new Error(text || "Failed to load volatility");
-            }
+            if (!res.ok) throw new Error(await res.text() || "Failed to load volatility");
             return res.json();
         }
 
@@ -551,7 +442,6 @@ def root() -> HTMLResponse:
         }
 
         async function refreshAll() {
-            // Fetch all data in parallel
             const [btcResult, volResult, perfResult] = await Promise.allSettled([
                 loadData(),
                 loadVolatility(),
@@ -561,13 +451,11 @@ def root() -> HTMLResponse:
                         if (!res.ok) return null;
                         return res.json();
                     } catch (e) {
-                        console.error("Performance fetch error:", e);
                         return null;
                     }
                 })(),
             ]);
 
-            // --- BTC chart ---
             if (btcResult.status === "fulfilled") {
                 renderChart(btcResult.value);
                 statusEl.textContent = `Loaded ${btcResult.value.prices.length} hours.`;
@@ -575,92 +463,46 @@ def root() -> HTMLResponse:
                 statusEl.textContent = `Error: ${btcResult.reason?.message || "Unknown error"}`;
             }
 
-            // --- Performance tracker cards ---
-            if (perfResult.status === "fulfilled" && perfResult.value) {
+            if (perfResult.status === "fulfilled" && perfResult.value && perfResult.value.status === "success") {
                 const data = perfResult.value;
-                if (data.total_trades !== undefined) {
-                    document.getElementById("trackTrades").textContent = data.total_trades;
-                    document.getElementById("trackWinRate").textContent = `${(data.win_rate * 100).toFixed(1)}%`;
-                    const payoffEl = document.getElementById("trackPayoff");
-                    payoffEl.textContent = `${data.cumulative_payoff >= 0 ? '+' : ''}$${data.cumulative_payoff.toFixed(2)}`;
-                    payoffEl.style.color = data.cumulative_payoff >= 0 ? "#58d2a3" : "#ff6b6b";
-                }
-                if (data.overall_accuracy !== undefined) {
-                    const accPct = (data.overall_accuracy * 100).toFixed(1);
-                    const accEl = document.getElementById("accOverall");
-                    accEl.textContent = `${accPct}%`;
-                    if (data.overall_accuracy >= 0.55) {
-                        accEl.style.color = "#58d2a3";
-                    } else if (data.overall_accuracy >= 0.50) {
-                        accEl.style.color = "#f0c040";
-                    } else {
-                        accEl.style.color = "#ff6b6b";
-                    }
-                    const missedEl = document.getElementById("accMissed");
-                    missedEl.textContent = data.missed_swings;
-                    missedEl.style.color = data.missed_swings > 0 ? "#ff6b6b" : "#58d2a3";
-                    document.getElementById("accLow").textContent = data.correct_low_calls;
-                    document.getElementById("accHours").textContent = data.sample_size;
-                }
-                window.__lastPerf = data;
-            } else {
-                window.__lastPerf = null;
+                document.getElementById("trackF1").textContent = data.f1.toFixed(3);
+                document.getElementById("trackPrecision").textContent = (data.precision * 100).toFixed(1) + "%";
+                document.getElementById("trackRecall").textContent = (data.recall * 100).toFixed(1) + "%";
+                document.getElementById("trackAccuracy").textContent = (data.accuracy * 100).toFixed(1) + "%";
+                
+                document.getElementById("trackTP").textContent = data.tp;
+                document.getElementById("trackFP").textContent = data.fp;
+                document.getElementById("trackTN").textContent = data.tn;
+                document.getElementById("trackFN").textContent = data.fn;
+                
+                document.getElementById("accHours").textContent = `Hours Tracked: ${data.total_tracked}`;
             }
 
-            // --- Volatility prediction ---
             const vStatusEl  = document.getElementById("volatilityStatus");
             const vDetailsEl = document.getElementById("volatilityDetails");
-            const posEl = document.getElementById("positionDetails");
-            const capEl = document.getElementById("capitalDisplay");
 
             if (volResult.status === "rejected") {
                 vStatusEl.textContent = `Error: ${volResult.reason?.message || "Unknown error"}`;
                 vDetailsEl.textContent = "";
-                posEl.textContent = "";
-                capEl.textContent = "";
                 return;
             }
 
             const v = volResult.value;
-            const perf = window.__lastPerf;
 
             if (!v || v.prediction === null || v.status === "no_prediction") {
                 vStatusEl.textContent = "No prediction available yet";
                 vDetailsEl.textContent = "Waiting for next hourly data...";
-                posEl.textContent = "";
-                capEl.textContent = "";
                 return;
             }
 
             const predText = v.prediction.toUpperCase();
-            vStatusEl.textContent = `Prediction: ${predText}`;
+            vStatusEl.textContent = `Target Prediction: ${predText}`;
             vStatusEl.style.color = predText === "HIGH" ? "#ff6b6b" : "#58d2a3";
             const confidence = predText === "HIGH" ? v.prob_high : (1 - v.prob_high);
             vDetailsEl.textContent =
-                `Confidence: ${(confidence * 100).toFixed(1)}% | ` +
-                `Threshold: ${v.threshold} | Profile: ${v.profile}`;
-
-            // Total equity = initial capital + cumulative realized P&L
-            const totalEquity = v.trade_capital + (perf ? perf.cumulative_payoff : 0);
-            const availableCapital = v.traded ? totalEquity - v.capital_at_risk : totalEquity;
-
-            capEl.textContent =
-                `Equity: $${totalEquity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}  |  ` +
-                `Available: $${availableCapital.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-            capEl.style.color = "#9aa3b2";
-
-            if (v.traded) {
-                posEl.textContent = `Current Position: $${v.capital_at_risk.toFixed(0)} (${(v.position_pct * 100).toFixed(0)}% of initial capital)`;
-                posEl.style.color = "#58d2a3";
-            } else if (predText === "HIGH") {
-                posEl.textContent = `No trade — confidence below 70% minimum (needs ${((0.70 - v.prob_high) * 100).toFixed(1)}% more)`;
-                posEl.style.color = "#f0c040";
-            } else {
-                posEl.textContent = "No position — prediction is LOW";
-                posEl.style.color = "#58d2a3";
-            }
+                `Probability of Spike: ${(v.prob_high * 100).toFixed(1)}% | ` +
+                `Calibrated Threshold: ${v.threshold.toFixed(3)}`;
         }
-        
 
         function scheduleHourlyRefresh() {
             const now = new Date();
@@ -681,4 +523,5 @@ def root() -> HTMLResponse:
     </script>
 </body>
 </html>
-""")
+"""
+        )
