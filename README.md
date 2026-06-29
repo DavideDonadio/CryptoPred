@@ -4,7 +4,7 @@ CryptoPred is a fully automated machine learning pipeline that predicts next-hou
 
 These sentiment signals are aggregated into hourly windows alongside price data fetched from Binance via the CCXT exchange library, producing a rich feature set that includes sentiment ratios, momentum deltas, cyclical time encodings, and multi-interval lagged returns and volatility. The engineered features feed an optimized LightGBM binary classifier that outputs a probabilistic forecast of whether the upcoming hour will experience a high-volatility spike. <br>
 
-his prediction is served through a FastAPI web application complete with an interactive dashboard displaying live BTC price charts, current prediction status, and rolling performance diagnostics including precision, recall, F1-score, and confusion matrix breakdowns. The entire application is containerized via Docker, enabling consistent deployment across any environment and continuous hourly inference through an internal scheduler that fetches new Reddit data, recomputes features, and stores predictions for retrospective evaluation.
+This prediction is served through a FastAPI web application complete with an interactive dashboard displaying live BTC price charts, current prediction status, and rolling performance diagnostics including precision, recall, F1-score, and confusion matrix breakdowns. The entire application is containerized via Docker, enabling consistent deployment across any environment and continuous hourly inference through an internal scheduler that fetches new Reddit data, recomputes features, and stores predictions for retrospective evaluation.
 
 ## Dataset Description
 
