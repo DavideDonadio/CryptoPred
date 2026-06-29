@@ -1,6 +1,6 @@
 # CryptoPred — Real-Time Crypto Volatility Forecasting with Social Sentiment
 
-CryptoPred is a fully automated machine learning pipeline that predicts next-hour cryptocurrency volatility by fusing real-time social media sentiment with live market data. The system ingests posts from six major crypto-focused subreddits — r/Bitcoin, r/Ethereum, r/Solana, r/CryptoCurrency, r/CryptoCurrencies, and r/Crypto_Currency_News — and processes them through a trained Support Vector Machine sentiment classifier that labels each post as bearish, neutral, or bullish. These sentiment signals are aggregated into hourly windows alongside price data fetched from Binance via the CCXT exchange library, producing a rich feature set that includes sentiment ratios, momentum deltas, cyclical time encodings, and multi-interval lagged returns and volatility. The engineered features feed an optimized LightGBM binary classifier that outputs a probabilistic forecast of whether the upcoming hour will experience a high-volatility spike. This prediction is served through a FastAPI web application complete with an interactive dashboard displaying live BTC price charts, current prediction status, and rolling performance diagnostics including precision, recall, F1-score, and confusion matrix breakdowns. The entire application is containerized via Docker, enabling consistent deployment across any environment and continuous hourly inference through an internal scheduler that fetches new Reddit data, recomputes features, and stores predictions for retrospective evaluation.
+CryptoPred is a fully automated machine learning pipeline that predicts next-hour cryptocurrency volatility by fusing real-time social media sentiment with live market data. The system ingests posts from six major crypto-focused subreddits — r/Bitcoin, r/Ethereum, r/Solana, r/CryptoCurrency, r/CryptoCurrencies, and r/Crypto_Currency_News — and processes them through a trained Support Vector Machine sentiment classifier that labels each post as bearish, neutral, or bullish. These sentiment signals are aggregated into hourly windows alongside price data fetched from Binance via the CCXT exchange library, producing a rich feature set that includes sentiment ratios, momentum deltas, cyclical time encodings, and multi-interval lagged returns and volatility. The engineered features feed an optimized XGBoost binary classifier that outputs a probabilistic forecast of whether the upcoming hour will experience a high-volatility spike. This prediction is served through a FastAPI web application complete with an interactive dashboard displaying live BTC price charts, current prediction status, and rolling performance diagnostics including precision, recall, F1-score, and confusion matrix breakdowns. The entire application is containerized via Docker, enabling consistent deployment across any environment and continuous hourly inference through an internal scheduler that fetches new Reddit data, recomputes features, and stores predictions for retrospective evaluation.
 
 ## Dataset Description
 
@@ -16,7 +16,7 @@ The target variable is a binary volatility classification derived by splitting h
 
 ### API Application (Docker)
 
-The Docker image bundles the FastAPI server, trained models (LightGBM + XGBoost volatility classifiers and SVM sentiment classifier), the Reddit scraper, and an internal cron scheduler. <br>
+The Docker image bundles the FastAPI server, trained models (LightGBM + XGBoost volatility classifiers and SVM sentiment classifier), the Reddit scraper, and an internal cron scheduler.<br>
 It is fully self-contained, no external dependencies are needed.
 
 ```bash
@@ -24,7 +24,7 @@ It is fully self-contained, no external dependencies are needed.
 docker pull ghcr.io/davidedonadio/cryptopred:latest
 
 # Run the container (dashboard available at http://localhost:8000)
-docker run -p 8000:8000 -v "$(pwd)/API_App/data/clean_reddit:/app/data/clean_reddit" ghcr.io/davidedonadio/cryptopred:latest
+docker run -d -p 8000:8000 -v "$(pwd)/API_App/data/clean_reddit:/app/data/clean_reddit" ghcr.io/davidedonadio/cryptopred:latest
 
 # Or build locally from source
 docker build -t ghcr.io/davidedonadio/cryptopred:latest API_App/
@@ -64,7 +64,7 @@ Averaging across folds, the multiclass formulation revealed a strong class imbal
 
 - **Class 1 (Medium Volatility): mean F1 ≈ 0.35** → This class consistently underperformed, indicating that the boundary between low and medium regimes is inherently noisy and weakly separable.
 
-Overall accuracy ranged between **0.47 and 0.76** across folds. Random Forest provided the strongest overall performance, achieving the highest average F1-scores for both Class 0 and Class 2, though XGBoost remained highly competitive for extreme event s. LightGBM showed comparable average performance but higher variance across folds.
+Overall accuracy ranged between **0.47 and 0.76** across folds. Random Forest provided the strongest overall performance, achieving the highest average F1-scores for both Class 0 and Class 2, though XGBoost remained highly competitive for extreme events. LightGBM showed comparable average performance but higher variance across folds.
 
 Feature importance analysis consistently identified market-structure variables as dominant predictors. `BTC-USD` volatility and its lagged values (1h, 3h, 12h) were the strongest features across all models, followed by ETH and SOL volatility lags, total post volume, and post spike ratio. The cyclical feature `hour_cos` was also consistently relevant, suggesting an intraday structure in volatility dynamics. Sentiment-derived features ranked lower overall, indicating weaker standalone predictive power.
 
@@ -79,9 +79,9 @@ To improve signal separability and reduce label ambiguity following multiclass f
 
 ### Impact on Learning Dynamics
 
-Simplifying the decision boundary allowed gradient boosting models to optimize directly for separating normal from extreme regimes. Model configurations were adjusted to handle class imbalances (e.g., `scale_pos_weight` for XGBoost, `class_weight="balanced"` for LightGBM/Random Forest). 
+Simplifying the decision boundary allowed gradient boosting models to optimize directly for separating normal from extreme regimes. Model configurations were adjusted to handle class imbalances (e.g., `scale_pos_weight` for XGBoost, `class_weight="balanced"` for LightGBM/Random Forest).
 
-This resulted in more stable probability outputs, improved recall for volatility spikes, and reduced sensitivity to label noise. 
+This resulted in more stable probability outputs, improved recall for volatility spikes, and reduced sensitivity to label noise.
 
 ### Resulting Model Performance
 
@@ -95,7 +95,7 @@ Feature importance remained consistent with Phase 2 with `BTC-USD_volatility` an
 
 ### AutoML Benchmark Comparison
 
-An AutoGluon stacking framework (combining LightGBM, CatBoost, Random Forest, and Extra Trees) was introduced to test if ensemble complexity could further improve metrics. 
+An AutoGluon stacking framework (combining LightGBM, CatBoost, Random Forest, and Extra Trees) was introduced to test if ensemble complexity could further improve metrics.
 
 While the AutoML system was highly competitive, it did not consistently outperform individually tuned gradient boosting models:
 * **Accuracy** ranged from **0.74 to 0.90** across folds.
