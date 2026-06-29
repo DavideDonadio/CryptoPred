@@ -24,7 +24,7 @@ It is fully self-contained, no external dependencies are needed.
 docker pull ghcr.io/davidedonadio/cryptopred:latest
 
 # Run the container (dashboard available at http://localhost:8000)
-docker run -p 8000:8000 ghcr.io/davidedonadio/cryptopred:latest
+docker run -p 8000:8000 -v "$(pwd)/API_App/data/clean_reddit:/app/data/clean_reddit" ghcr.io/davidedonadio/cryptopred:latest
 
 # Or build locally from source
 docker build -t ghcr.io/davidedonadio/cryptopred:latest API_App/
@@ -64,7 +64,7 @@ Averaging across folds, the multiclass formulation revealed a strong class imbal
 
 - **Class 1 (Medium Volatility): mean F1 ≈ 0.35** → This class consistently underperformed, indicating that the boundary between low and medium regimes is inherently noisy and weakly separable.
 
-Overall accuracy ranged between **0.47 and 0.76** across folds. Random Forest provided the strongest overall performance, achieving the highest average F1-scores for both Class 0 and Class 2, though XGBoost remained highly competitive for extreme events. LightGBM showed comparable average performance but higher variance across folds.
+Overall accuracy ranged between **0.47 and 0.76** across folds. Random Forest provided the strongest overall performance, achieving the highest average F1-scores for both Class 0 and Class 2, though XGBoost remained highly competitive for extreme event s. LightGBM showed comparable average performance but higher variance across folds.
 
 Feature importance analysis consistently identified market-structure variables as dominant predictors. `BTC-USD` volatility and its lagged values (1h, 3h, 12h) were the strongest features across all models, followed by ETH and SOL volatility lags, total post volume, and post spike ratio. The cyclical feature `hour_cos` was also consistently relevant, suggesting an intraday structure in volatility dynamics. Sentiment-derived features ranked lower overall, indicating weaker standalone predictive power.
 
@@ -121,13 +121,13 @@ Following training, decision thresholds were optimized independently for each mo
 ### Final Results (Held-Out Test Set)
 
 #### LightGBM
-- Test F1-score (positive class): **0.63**
-- Precision: **0.58**
-- Recall: **0.69**
-- Optimal threshold: **0.485**
-- Calibration F1-score: **0.488**
-- PR-AUC (test): **0.719**
-- Signals: 224 (TP = 131, FP = 93)
+- Test F1-score (positive class): **0.62**
+- Precision: **0.55**
+- Recall: **0.70**
+- Optimal threshold: **0.495**
+- Calibration F1-score: **0.490**
+- PR-AUC (test): **0.725**
+- Signals: 241 (TP = 133, FP = 108)
 
 #### XGBoost
 - Test F1-score (positive class): **0.63**
@@ -138,7 +138,7 @@ Following training, decision thresholds were optimized independently for each mo
 - PR-AUC (test): **0.717**
 - Signals: 229 (TP = 132, FP = 97)
 
-Both models converge to a similar operating region characterized by high recall (~0.70) and moderate precision (~0.58), indicating effective detection of volatility spikes with a controlled false positive rate. The similarity in optimal thresholds (~0.48–0.50) suggests broadly consistent probability calibration across both boosting frameworks.
+Both models converge to a similar operating region characterized by high recall (~0.70) and moderate precision (~0.56), indicating effective detection of volatility spikes with a controlled false positive rate. The similarity in optimal thresholds (~0.48–0.50) suggests broadly consistent probability calibration across both frameworks.
 
 ---
 

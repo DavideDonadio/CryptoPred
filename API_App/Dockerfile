@@ -33,6 +33,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     chromium-driver \
     cron \
+    xvfb \
+    xauth \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy venv from builder
@@ -51,8 +54,9 @@ COPY live_data_builder.py ./
 COPY pipeline.sh ./
 COPY entrypoint.sh ./
 
-# Copy data directories and model files
-COPY data/ ./data/
+# Copy model files only (runtime data comes from volume mount)
+COPY data/models/ ./data/models/
+RUN mkdir -p /app/data/clean_reddit
 
 # Make scripts executable
 RUN chmod +x pipeline.sh entrypoint.sh

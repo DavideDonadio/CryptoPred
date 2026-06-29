@@ -2,5 +2,5 @@ SHELL=/bin/bash
 PATH=/app/.venv/bin:/usr/local/bin:/usr/bin:/bin
 
 # Scrape Reddit and build live data at minute 0 every hour
-0 * * * * /app/pipeline.sh >> /var/log/cron.log 2>&1
+0 * * * * root /app/pipeline.sh >> /var/log/cron.log 2>&1
 

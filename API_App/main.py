@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Query
 from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse
 import os
@@ -17,7 +17,7 @@ BASE_DIR = "/app"
 LIVE_DATA_PATH = os.path.join(BASE_DIR, "data", "clean_reddit", "live_data.csv")
 PREDICTIONS = os.path.join(BASE_DIR, "data", "clean_reddit", "predictions.csv")
 THRESHOLDS_JSON = os.path.join(BASE_DIR, "data", "models", "optimal_thresholds.json")
-MODEL_PATH = os.path.join(BASE_DIR, "data", "models", "lgb_volatility.pkl")
+MODEL_PATH = os.path.join(BASE_DIR, "data", "models", "xgb_volatility.pkl")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -39,7 +39,7 @@ def load_threshold_from_json() -> float:
     try:
         with open(THRESHOLDS_JSON, "r") as f:
             data = json.load(f)
-        return float(data.get("lgb", default))
+        return float(data.get("xgb", default))
     except (json.JSONDecodeError, IOError, ValueError):
         logger.warning("Could not parse %s. Using default %.2f.", THRESHOLDS_JSON, default)
         return default
@@ -78,20 +78,20 @@ def compute_prediction() -> dict:
         logger.warning("Feature columns with NaN values (filling with 0): %s", nan_cols)
 
     features = features.fillna(0)
-    lgb = pickle.load(open(MODEL_PATH, "rb"))
+    xgb = pickle.load(open(MODEL_PATH, "rb"))
 
-    if hasattr(lgb, "feature_names_in_"):
-        features = features[lgb.feature_names_in_]
-    elif hasattr(lgb, "feature_name_"):
-        features = features[lgb.feature_name_]
+    if hasattr(xgb, "feature_names_in_"):
+        features = features[xgb.feature_names_in_]
+    elif hasattr(xgb, "feature_name_"):
+        features = features[xgb.feature_name_]
 
-    _, lgb_high = lgb.predict_proba(features)[0]
+    _, xgb_high = xgb.predict_proba(features)[0]
     current_threshold = load_threshold_from_json()
-    signal = 1 if lgb_high >= current_threshold else 0
+    signal = 1 if xgb_high >= current_threshold else 0
 
     return {
         "prediction": "high" if signal == 1 else "low",
-        "prob_high": lgb_high,
+        "prob_high": xgb_high,
         "signal_triggered": signal,
         "threshold": current_threshold,
         "timestamp": pd.to_datetime(row.index[0], utc=True),
@@ -209,9 +209,10 @@ def btc_price(limit: int = Query(12, ge=1, le=720)):
         return {
             "timestamps": [ts.isoformat() for ts in df.index],
             "prices": [float(val) for val in df["BTC-USD_close"].tolist()],
+            "volatilities": [round(float(val) * 100, 3) for val in df["BTC-USD_volatility"].tolist()],
         }
     except (FileNotFoundError, KeyError):
-        return {"timestamps": [], "prices": [], "msg": "No data available yet. Waiting for first data collection cycle."}
+        return {"timestamps": [], "prices": [], "volatilities": [], "msg": "No data available yet. Waiting for first data collection cycle."}
 
 @app.get("/api/volatility")
 def volatility(limit: int = Query(1, ge=1, le=720)):
@@ -430,6 +431,7 @@ def root() -> HTMLResponse:
                 chartInstance.update();
                 return;
             }
+            const hasVol = payload.volatilities && payload.volatilities.length > 0;
             chartInstance = new Chart(ctx, {
                 type: "line",
                 data: {
@@ -440,19 +442,46 @@ def root() -> HTMLResponse:
                         borderColor: "#58d2a3",
                         backgroundColor: "rgba(88, 210, 163, 0.12)",
                         tension: 0.3,
-                    }],
+                        yAxisID: "y",
+                        order: 2,
+                    },
+                    ...(hasVol ? [{
+                        label: "Volatility %",
+                        data: payload.volatilities,
+                        borderColor: "#ff9f43",
+                        backgroundColor: "rgba(255, 159, 67, 0.08)",
+                        tension: 0.3,
+                        borderWidth: 1.5,
+                        borderDash: [4, 4],
+                        yAxisID: "y1",
+                        order: 1,
+                    }] : [])],
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
+                    interaction: { mode: "index", intersect: false },
                     scales: {
                         x: {
                             ticks: { color: "#b8c0cc", maxTicksLimit: 24 },
                             grid: { color: "rgba(255,255,255,0.05)" },
                         },
                         y: {
-                            ticks: { color: "#b8c0cc" },
+                            type: "linear",
+                            display: true,
+                            position: "left",
+                            title: { display: true, text: "BTC / USD", color: "#58d2a3" },
+                            ticks: { color: "#58d2a3" },
                             grid: { color: "rgba(255,255,255,0.05)" },
+                        },
+                        y1: {
+                            type: "linear",
+                            display: hasVol,
+                            position: "right",
+                            title: { display: true, text: "Volatility %", color: "#ff9f43" },
+                            ticks: { color: "#ff9f43" },
+                            grid: { drawOnChartArea: false },
+                            ...(hasVol ? { min: 0 } : {}),
                         },
                     },
                     plugins: {
