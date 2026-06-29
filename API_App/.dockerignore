@@ -4,3 +4,7 @@ __pycache__/
 .git/
 *.md
 .DS_Store
+
+data/raw_reddit/
+data/sentiment/
+data/clean_reddit/final_submission_clean.csv

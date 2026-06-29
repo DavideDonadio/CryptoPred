@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("cryptopred")
 
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+BASE_DIR = "/app"
 LIVE_DATA_PATH = os.path.join(BASE_DIR, "data", "clean_reddit", "live_data.csv")
 PREDICTIONS = os.path.join(BASE_DIR, "data", "clean_reddit", "predictions.csv")
 THRESHOLDS_JSON = os.path.join(BASE_DIR, "data", "models", "optimal_thresholds.json")
@@ -204,11 +204,14 @@ def get_performance_metrics():
 
 @app.get("/api/btc-price")
 def btc_price(limit: int = Query(12, ge=1, le=720)):
-    df = load_btc_price_series(limit)
-    return {
-        "timestamps": [ts.isoformat() for ts in df.index],
-        "prices": [float(val) for val in df["BTC-USD_close"].tolist()],
-    }
+    try:
+        df = load_btc_price_series(limit)
+        return {
+            "timestamps": [ts.isoformat() for ts in df.index],
+            "prices": [float(val) for val in df["BTC-USD_close"].tolist()],
+        }
+    except (FileNotFoundError, KeyError):
+        return {"timestamps": [], "prices": [], "msg": "No data available yet. Waiting for first data collection cycle."}
 
 @app.get("/api/volatility")
 def volatility(limit: int = Query(1, ge=1, le=720)):
@@ -235,6 +238,24 @@ def volatility(limit: int = Query(1, ge=1, le=720)):
             "threshold": None,
             "status": "no_prediction",
         }
+
+@app.get("/api/live_sentiment")
+def live_sentiment():
+    try:
+        df = load_last_live_data_row()
+        return {
+            "ticker": "BTC",
+            "sentiment_score": float(df["BTC_sentiment_score"].iloc[0]),
+            "bullish_ratio": float(df["BTC_bullish_ratio"].iloc[0]),
+            "bearish_ratio": float(df["BTC_bearish_ratio"].iloc[0]),
+            "weighted_sentiment": float(df["BTC_weighted_sentiment"].iloc[0]),
+            "delta_sentiment": float(df["BTC_delta_sentiment"].iloc[0]),
+            "total_posts": int(df["total_post_count"].iloc[0]),
+            "timestamp": df.index[0].isoformat(),
+            "status": "success"
+        }
+    except (FileNotFoundError, KeyError):
+        return {"status": "no_data", "msg": "No live data available yet. Waiting for first data collection cycle."}
 
 async def scheduler():
     while True:

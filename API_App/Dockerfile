@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml uv.lock ./
 
 # Install Python deps
-RUN uv sync --frozen --no-dev
+RUN uv sync --no-dev
 
 # --- Runtime stage ---
 FROM python:3.11-slim AS runtime

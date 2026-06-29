@@ -38,9 +38,10 @@ The container starts two processes:
 | Endpoint | Description |
 |---|---|
 | `GET /` | Interactive dashboard with BTC price chart and live diagnostics |
-| `GET /api/volatility` | Current prediction (high/low), probability, and threshold |
-| `GET /api/btc-price?limit=24` | Recent BTC closing prices |
-| `GET /api/performance` | Rolling confusion matrix and classification metrics |
+| `GET /api/volatility`     | Current prediction (high/low), probability, and threshold |
+| `GET /api/btc-price`      | Recent BTC closing prices |
+| `GET /api/performance`    | Rolling confusion matrix and classification metrics |
+| `GET /api/live_sentiment` | Latest hour's aggregated BTC sentiment score, ratios, and momentum |
 
 
 ## Project Results
