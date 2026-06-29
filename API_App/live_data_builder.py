@@ -8,6 +8,8 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta
 import json
 
+BASE_DIR = "/app"
+
 def clean_reddit_text(text):
     if not isinstance(text, str):
         return ""
@@ -23,29 +25,27 @@ def prepare_market_data(df, ticker):
     return df[[f"{ticker}_close", f"{ticker}_return", f"{ticker}_volatility", f"{ticker}_vol_log"]]
 
 def fetch_ccxt(symbol, start_dt, end_dt, timeframe='1h'):
-    
     exchange = ccxt.binance({'enableRateLimit': True})
-    
     start = exchange.parse8601(start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
     end = exchange.parse8601(end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
     all_kline = []
 
     if start is None or end is None:
         raise ValueError("Could not parse the provided start_str or end_str dates.")
-    
+
     while start < end:
         try:
             klines = exchange.fetch_ohlcv(symbol, timeframe, start, limit=1000)
             if not klines:
                 break
-            start = klines[-1][0] + 1 
+            start = klines[-1][0] + 1
             all_kline.extend(klines)
             if klines[-1][0] >= end:
                 break
         except Exception as e:
             print(f"Error fetching {symbol}: {e}")
             break
-            
+
     df = pd.DataFrame(all_kline, columns=['Datetime', 'Open', 'High', 'Low', 'Close', 'Volume'])
     df['Datetime'] = pd.to_datetime(df['Datetime'], unit='ms', utc=True)
     df.set_index('Datetime', inplace=True)
@@ -57,7 +57,7 @@ def generate_financial_columns(group):
     eth_count = group["sentiment_eth"].notna().sum()
     sol_count = group["sentiment_sol"].notna().sum()
     gen_count = group["sentiment_gen"].notna().sum()
-    
+
     bullish_btc = (group["sentiment_btc"] == 2).sum()
     bearish_btc = (group["sentiment_btc"] == 0).sum()
     bullish_eth = (group["sentiment_eth"] == 2).sum()
@@ -92,7 +92,6 @@ def generate_financial_columns(group):
     })
 
 def get_reddit_content(datasets, svm_model, start_dt=None):
-
     all_dfs = []
 
     sentiment_col_map = {
@@ -103,8 +102,13 @@ def get_reddit_content(datasets, svm_model, start_dt=None):
 
     for dataset in datasets:
         records = []
+        json_path = os.path.join(BASE_DIR, "data", "clean_reddit", f"{dataset}.json")
 
-        with open(f'data/clean_reddit/{dataset}.json', 'r') as file:
+        if not os.path.exists(json_path):
+            print(f"r/{dataset}: {json_path} not found, skipping")
+            continue
+
+        with open(json_path, 'r') as file:
             data = json.load(file)
 
         children = data.get("data", {}).get("children", [])
@@ -113,7 +117,6 @@ def get_reddit_content(datasets, svm_model, start_dt=None):
             continue
 
         for post in children:
-            
             p_data = post.get("data", {})
             created_utc = p_data.get("created_utc")
             title = p_data.get("title", "")
@@ -153,7 +156,6 @@ def get_reddit_content(datasets, svm_model, start_dt=None):
     return final_df.set_index("created").sort_index()
 
 def main():
-
     now = datetime.now(timezone.utc)
     rolling_window_hours = 24
     max_lag_hours = 12
@@ -173,15 +175,16 @@ def main():
     subreddits = ["bitcoin", "cryptocurrency", "cryptocurrencies", "crypto_currency_news", "ethereum", "solana"]
     prefixes = ['BTC', 'ETH', 'SOL', 'GEN']
     tickers = ['BTC-USD', 'ETH-USD', 'SOL-USD']
-    
-    svm_model = pickle.load(open("data/models/svm.pkl", "rb"))
-    
+
+    svm_path = os.path.join(BASE_DIR, "data", "models", "svm.pkl")
+    svm_model = pickle.load(open(svm_path, "rb"))
+
     df_final = get_reddit_content(subreddits, svm_model, start_dt=start_history)
     if df_final.empty:
         print("No new entries, stopping.")
         return
 
-    raw_posts_path = "data/clean_reddit/live_reddit_posts.csv"
+    raw_posts_path = os.path.join(BASE_DIR, "data", "clean_reddit", "live_reddit_posts.csv")
     df_final.reset_index().to_csv(raw_posts_path, index=False)
     print(f"Saved raw Reddit posts to {raw_posts_path}")
 
@@ -196,33 +199,33 @@ def main():
     df_final["ETH_delta_sentiment"] = df_final["ETH_sentiment_score"].diff()
     df_final["SOL_delta_sentiment"] = df_final["SOL_sentiment_score"].diff()
     df_final["GEN_delta_sentiment"] = df_final["GEN_sentiment_score"].diff()
-    
+
     for prefix in ["BTC", "ETH", "SOL", "GEN"]:
         count_col = f"{prefix}_post_count"
         delta_col = f"{prefix}_delta_sentiment"
         df_final.loc[df_final[count_col] == 0, delta_col] = 0
-        
+
     df_final[["BTC_delta_sentiment",
               "ETH_delta_sentiment",
               "SOL_delta_sentiment",
               "GEN_delta_sentiment",
     ]] = df_final[["BTC_delta_sentiment","ETH_delta_sentiment","SOL_delta_sentiment","GEN_delta_sentiment",]].fillna(0)
-    
+
     df_final.drop(columns=["BTC_post_count","ETH_post_count","SOL_post_count","GEN_post_count",], inplace=True)
-    
+
     df_final = df_final.join([btc, eth, sol], how="inner")
 
-    df_final['hour_of_day'] = df_final.index.hour # type: ignore
+    df_final['hour_of_day'] = df_final.index.hour
     df_final['hour_sin'] = np.sin(2 * np.pi * df_final['hour_of_day'] / 24)
-    df_final['hour_cos'] = np.cos(2 * np.pi * df_final['hour_of_day'] / 24)     
-    df_final['day_of_week'] = df_final.index.dayofweek # type: ignore
+    df_final['hour_cos'] = np.cos(2 * np.pi * df_final['hour_of_day'] / 24)
+    df_final['day_of_week'] = df_final.index.dayofweek
     df_final['day_sin'] = np.sin(2 * np.pi * df_final['day_of_week'] / 7)
-    df_final['day_cos'] = np.cos(2 * np.pi * df_final['day_of_week'] / 7)   
+    df_final['day_cos'] = np.cos(2 * np.pi * df_final['day_of_week'] / 7)
     df_final.drop(columns=['hour_of_day', 'day_of_week'], inplace=True)
-    
+
     for p in prefixes:
         df_final[f'{p}_polarity'] = df_final[f'{p}_bullish_ratio'] - df_final[f'{p}_bearish_ratio']
-        
+
     features_to_lag = []
     for p in prefixes:
         features_to_lag.append(f'{p}_polarity')
@@ -231,15 +234,15 @@ def main():
         features_to_lag.append(f'{t}_return')
         features_to_lag.append(f'{t}_volatility')
         features_to_lag.append(f'{t}_vol_log')
-        
+
     for col in features_to_lag:
         df_final[f'{col}_lag_1'] = df_final[col].shift(1)
         df_final[f'{col}_lag_3'] = df_final[col].shift(3)
         df_final[f'{col}_lag_6'] = df_final[col].shift(6)
         df_final[f'{col}_lag_12'] = df_final[col].shift(12)
-        
+
     df_final.drop(columns=[f'{p}_polarity' for p in prefixes], inplace=True)
-    
+
     df_final['BTC_vol_target'] = pd.cut(df_final['BTC-USD_volatility'], bins=[-np.inf, 0.00638, 0.01069, np.inf], labels=[0, 1, 2])
     df_final['SOL_vol_target'] = pd.cut(df_final['SOL-USD_volatility'], bins=[-np.inf, 0.01205, 0.01960, np.inf], labels=[0, 1, 2])
     df_final['ETH_vol_target'] = pd.cut(df_final['ETH-USD_volatility'], bins=[-np.inf, 0.00867, 0.01427, np.inf], labels=[0, 1, 2])
@@ -247,17 +250,17 @@ def main():
     df_final['BTC_vol_target'] = df_final['BTC_vol_target'].shift(-1)
     df_final['SOL_vol_target'] = df_final['SOL_vol_target'].shift(-1)
     df_final['ETH_vol_target'] = df_final['ETH_vol_target'].shift(-1)
-    
+
     df_final['post_volume_24h_avg'] = df_final['total_post_count'].rolling(window=24).mean()
     df_final['post_spike_ratio'] = df_final['total_post_count'] / (df_final['post_volume_24h_avg'] + 1)
-    
+
     lag_cols = [f'{col}_lag_{lag}' for col in features_to_lag for lag in [1, 3, 6, 12]]
     df_final = df_final.dropna(subset=['post_volume_24h_avg'] + lag_cols)
 
     if df_final.empty:
         print("No complete rows after feature engineering, stopping.")
         return
-    
+
     completed_hour = pd.Timestamp(now).floor("h") - pd.Timedelta(hours=1)
     df_final = df_final[df_final.index <= completed_hour]
     print(f"Truncated to completed hour {completed_hour}: {len(df_final)} rows remain")
@@ -266,10 +269,10 @@ def main():
         print("No completed rows after truncation, stopping.")
         return
 
-    csv_path = "data/clean_reddit/live_data.csv"
+    csv_path = os.path.join(BASE_DIR, "data", "clean_reddit", "live_data.csv")
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     df_final.index.name = "index"
-    
+
     if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
         df_final.to_csv(csv_path, index=True)
         print(f"Created new CSV file with {len(df_final)} rows")
@@ -279,7 +282,7 @@ def main():
             existing.index = pd.to_datetime(existing.index, utc=True, errors="coerce")
             latest_completed_row = df_final.iloc[[-1]].copy()
             latest_ts = latest_completed_row.index[0]
-            
+
             if latest_ts in existing.index:
                 print(f"Latest hour {latest_ts} already exists, skipping append.")
                 return

@@ -15,3 +15,10 @@ data/clean_reddit/live_data.csv
 data/clean_reddit/predictions.csv
 data/clean_reddit/live_reddit_posts.csv
 scraper.log
+AutogluonModels/
+
+# Docker runtime files
+API_App/data/clean_reddit/live_data.csv
+API_App/data/clean_reddit/predictions.csv
+API_App/data/clean_reddit/live_reddit_posts.csv
+API_App/data/clean_reddit/*.json
