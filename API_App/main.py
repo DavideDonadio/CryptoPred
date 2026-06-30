@@ -53,13 +53,14 @@ def backfill_predictions() -> None:
             pred = "high" if high >= threshold else "low"
             signal = 1 if high >= threshold else 0
             rows.append({
-                "timestamp": idx.isoformat(),
+                "timestamp": idx,
                 "prediction": pred,
                 "prob_high": round(high, 7),
                 "signal_triggered": signal,
                 "threshold_used": threshold,
             })
-        pd.DataFrame(rows).to_csv(PREDICTIONS, index=False)
+            
+        pd.DataFrame(rows).to_csv(PREDICTIONS, index=False, date_format="%Y-%m-%d %H:%M:%S%z")
         logger.info("[backfill] generated %d predictions", len(rows))
     except Exception as e:
         logger.error("[backfill] failed: %s", e)
@@ -92,9 +93,11 @@ def write_prediction(pred_row: pd.DataFrame) -> None:
     if df.empty or "timestamp" not in df.columns:
         pred_row.to_csv(PREDICTIONS, index=False, date_format="%Y-%m-%d %H:%M:%S%z")
         return
+    
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     new_ts = pd.to_datetime(pred_row["timestamp"].iloc[0], utc=True)
-    if new_ts not in df["timestamp"].values:
+    
+    if not (df["timestamp"] == new_ts).any():
         pred_row.to_csv(PREDICTIONS, mode="a", header=False, index=False, date_format="%Y-%m-%d %H:%M:%S%z")
 
 def compute_prediction() -> dict:
