@@ -28,7 +28,7 @@ It is fully self-contained, no external dependencies are needed.
 docker pull ghcr.io/davidedonadio/cryptopred:latest
 
 # Run the container (dashboard available at http://localhost:8000)
-docker run -d -p 8000:8000 -v "$(pwd)/API_App/data/clean_reddit:/app/data/clean_reddit" ghcr.io/davidedonadio/cryptopred:latest
+docker run -d --name cryptopred -p 8000:8000 -v "$(pwd)/API_App/data/clean_reddit:/app/data/clean_reddit:Z" ghcr.io/davidedonadio/cryptopred:latest
 
 # Or build locally from source
 docker build -t ghcr.io/davidedonadio/cryptopred:latest API_App/
@@ -37,6 +37,15 @@ docker build -t ghcr.io/davidedonadio/cryptopred:latest API_App/
 The container starts two processes:
 - **cron** triggers `pipeline.sh` at the top of each hour to scrape Reddit and build live features
 - **uvicorn** serves the FastAPI app with predictions updated at minute 4 past each hour
+
+### First Data Pull
+
+On a fresh start, the container has no data yet. To populate the dashboard immediately without waiting for the next cron cycle:
+
+```bash
+# Manually run the pipeline (fetches ~39 hours of price data + latest Reddit posts)
+docker exec cryptopred /app/pipeline.sh
+```
 
 ### API Endpoints
 | Endpoint | Description |
