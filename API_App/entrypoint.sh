@@ -1,6 +1,12 @@
 #!/bin/bash
 set -e
 
+if [ ! -f /app/data/clean_reddit/live_data.csv ]; then
+    echo "First run detected — populating initial data..."
+    /app/pipeline.sh || true
+    echo "Initial data population complete."
+fi
+
 echo "Starting cron daemon..."
 cron
 
