@@ -99,6 +99,7 @@ def get_reddit_content(datasets, svm_model, start_dt=None):
         "ethereum": "sentiment_eth",
         "solana": "sentiment_sol",
     }
+    subreddit_horizons = []
 
     for dataset in datasets:
         records = []
@@ -116,6 +117,7 @@ def get_reddit_content(datasets, svm_model, start_dt=None):
             print(f"r/{dataset}: no posts returned")
             continue
 
+        timestamps_in_file = []
         for post in children:
             p_data = post.get("data", {})
             created_utc = p_data.get("created_utc")
@@ -125,6 +127,8 @@ def get_reddit_content(datasets, svm_model, start_dt=None):
                 continue
 
             created_dt = pd.to_datetime(created_utc, unit="s", utc=True)
+            timestamps_in_file.append(created_dt)
+
             if start_dt is not None and created_dt < start_dt:
                 continue
 
@@ -136,6 +140,10 @@ def get_reddit_content(datasets, svm_model, start_dt=None):
                 "subreddit": dataset,
                 "text": clean_text
             })
+
+        if timestamps_in_file:
+            oldest_post_in_file = min(timestamps_in_file)
+            subreddit_horizons.append(oldest_post_in_file)
 
         if not records:
             print(f"r/{dataset}: no valid posts parsed")
@@ -150,10 +158,12 @@ def get_reddit_content(datasets, svm_model, start_dt=None):
         all_dfs.append(sub_df)
 
     if not all_dfs:
-        return pd.DataFrame()
+        return pd.DataFrame(), start_dt
+    
+    safe_start_boundary = max(subreddit_horizons).floor("h") if subreddit_horizons else start_dt
 
     final_df = pd.concat(all_dfs, ignore_index=True)
-    return final_df.set_index("created").sort_index()
+    return final_df.set_index("created").sort_index(), safe_start_boundary
 
 def main():
     now = datetime.now(timezone.utc)
@@ -179,7 +189,7 @@ def main():
     svm_path = os.path.join(BASE_DIR, "data", "models", "svm.pkl")
     svm_model = pickle.load(open(svm_path, "rb"))
 
-    df_final = get_reddit_content(subreddits, svm_model, start_dt=start_history)
+    df_final, safe_start_boundary = get_reddit_content(subreddits, svm_model, start_dt=start_history)
     if df_final.empty:
         print("No new entries, stopping.")
         return
@@ -253,6 +263,9 @@ def main():
 
     df_final['post_volume_24h_avg'] = df_final['total_post_count'].rolling(window=24).mean()
     df_final['post_spike_ratio'] = df_final['total_post_count'] / (df_final['post_volume_24h_avg'] + 1)
+
+
+    df_final = df_final[df_final.index >= safe_start_boundary]
 
     lag_cols = [f'{col}_lag_{lag}' for col in features_to_lag for lag in [1, 3, 6, 12]]
     df_final = df_final.dropna(subset=['post_volume_24h_avg'] + lag_cols)
