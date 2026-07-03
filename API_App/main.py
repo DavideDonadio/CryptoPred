@@ -496,7 +496,7 @@ def root() -> HTMLResponse:
             return r.json();
         }
 
-        function renderProbChart(data) {
+        function renderProbChart(data, realVolData) {
             const probStatus = document.getElementById("probStatus");
             if (!data.history || data.history.length === 0) {
                 probStatus.textContent = "No prediction data yet.";
@@ -505,30 +505,63 @@ def root() -> HTMLResponse:
             const labels = data.history.map(h => formatTimestamp(h.timestamp));
             const probs = data.history.map(h => h.prob_high);
             const threshold = data.history[0]?.threshold || 0.495;
+
+            let realVols = null;
+            if (realVolData && realVolData.timestamps && realVolData.volatilities) {
+                const volMap = {};
+                for (let i = 0; i < realVolData.timestamps.length; i++) {
+                    volMap[formatTimestamp(realVolData.timestamps[i])] = realVolData.volatilities[i];
+                }
+                realVols = labels.map(l => volMap[l] !== undefined ? volMap[l] : null);
+            }
+
             const ctx = document.getElementById("probChart").getContext("2d");
             if (probChartInstance) {
                 probChartInstance.data.labels = labels;
                 probChartInstance.data.datasets[0].data = probs;
                 probChartInstance.data.datasets[1].data = Array(labels.length).fill(threshold);
+                if (realVols && probChartInstance.data.datasets[2]) {
+                    probChartInstance.data.datasets[2].data = realVols;
+                } else if (!realVols && probChartInstance.data.datasets[2]) {
+                    probChartInstance.data.datasets.splice(2, 1);
+                }
                 probChartInstance.update();
                 return;
             }
+
+            const datasets = [
+                { label: "P(High Vol.)", data: probs, borderColor: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.08)", tension: 0.3, fill: true, pointRadius: 2, yAxisID: "y" },
+                { label: `Threshold (${(threshold*100).toFixed(1)}%)`, data: Array(labels.length).fill(threshold), borderColor: "rgba(255,255,255,0.25)", borderWidth: 1, borderDash: [4,4], pointRadius: 0, fill: false, yAxisID: "y" },
+            ];
+
+            const scales = {
+                x: { ticks: { color: "#b8c0cc", maxTicksLimit: 24 }, grid: { color: "rgba(255,255,255,0.05)" } },
+                y: { min: 0, max: 1, ticks: { color: "#ff6b6b", callback: v => (v*100).toFixed(0)+"%" }, grid: { color: "rgba(255,255,255,0.05)" }, title: { display: true, text: "Probability", color: "#ff6b6b" } },
+                y1: { type: "linear", display: true, position: "right", min: 0, ticks: { color: "#ff9f43", callback: v => v.toFixed(1)+"%" }, grid: { drawOnChartArea: false }, title: { display: true, text: "Volatility %", color: "#ff9f43" } },
+            };
+
+            if (realVols) {
+                datasets.push({ label: "Real Volatility %", data: realVols, borderColor: "#ff9f43", backgroundColor: "rgba(255,159,67,0.06)", tension: 0.3, borderWidth: 1.5, pointRadius: 1.5, yAxisID: "y1" });
+            }
+
+            datasets.push({
+                label: "High Vol. Threshold (1.069%)",
+                data: Array(labels.length).fill(1.069),
+                borderColor: "rgba(255,107,107,0.5)",
+                borderWidth: 1,
+                borderDash: [6,4],
+                pointRadius: 0,
+                fill: false,
+                yAxisID: "y1",
+            });
+
             probChartInstance = new Chart(ctx, {
                 type: "line",
-                data: {
-                    labels: labels,
-                    datasets: [
-                        { label: "P(High Volatility)", data: probs, borderColor: "#f97316", backgroundColor: "rgba(249,115,22,0.08)", tension: 0.3, fill: true, pointRadius: 2 },
-                        { label: `Threshold (${(threshold*100).toFixed(1)}%)`, data: Array(labels.length).fill(threshold), borderColor: "rgba(255,255,255,0.25)", borderWidth: 1, borderDash: [4,4], pointRadius: 0, fill: false },
-                    ],
-                },
+                data: { labels: labels, datasets: datasets },
                 options: {
                     responsive: true, maintainAspectRatio: false,
                     plugins: { legend: { labels: { color: "#f4f5f7" } } },
-                    scales: {
-                        x: { ticks: { color: "#b8c0cc", maxTicksLimit: 24 }, grid: { color: "rgba(255,255,255,0.05)" } },
-                        y: { min: 0, max: 1, ticks: { color: "#f97316", callback: v => (v*100).toFixed(0)+"%" }, grid: { color: "rgba(255,255,255,0.05)" }, title: { display: true, text: "Probability", color: "#f97316" } },
-                    },
+                    scales: scales,
                 },
             });
             probStatus.textContent = "Loaded " + data.history.length + " predictions.";
@@ -770,8 +803,9 @@ def root() -> HTMLResponse:
                 renderSentimentChart(sentResult.value);
             }
 
+            const btcPayload = btcResult.status === "fulfilled" ? btcResult.value : null;
             if (probResult.status === "fulfilled") {
-                renderProbChart(probResult.value);
+                renderProbChart(probResult.value, btcPayload);
             }
 
             const vStatusEl  = document.getElementById("volatilityStatus");
