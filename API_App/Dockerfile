@@ -23,12 +23,13 @@ COPY pyproject.toml uv.lock ./
 # Install Python deps
 RUN uv sync --no-dev
 
+
 # --- Runtime stage ---
 FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
-# Install runtime system deps
+# Install runtime system deps AND tini to clean up cron zombies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     chromium-driver \
@@ -36,6 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
     xauth \
     libgomp1 \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy venv from builder
@@ -72,4 +74,5 @@ RUN mkdir -p /app/logs
 
 EXPOSE 8000
 
-ENTRYPOINT ["/app/entrypoint.sh"]
+# Using tini to kill dead cron/python processes automatically
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
