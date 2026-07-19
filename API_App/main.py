@@ -39,15 +39,20 @@ def backfill_predictions() -> None:
         df = pd.read_csv(LIVE_DATA_PATH, index_col=0)
         if df.empty:
             return
+        
         df.index = pd.to_datetime(df.index, utc=True)
         model = pickle.load(open(MODEL_PATH, "rb"))
         threshold = load_threshold_from_json()
+
         to_drop = ["BTC_vol_target", "ETH_vol_target", "SOL_vol_target"]
         features = df.drop(columns=to_drop, errors="ignore").fillna(0)
+
         if hasattr(model, "feature_names_in_"):
             features = features[model.feature_names_in_]
+
         probs = model.predict_proba(features)
         rows = []
+
         for i, idx in enumerate(df.index):
             high = probs[i][1]
             pred = "high" if high >= threshold else "low"
@@ -103,21 +108,27 @@ def write_prediction(pred_row: pd.DataFrame) -> None:
 def compute_prediction() -> dict:
     if not os.path.exists(MODEL_PATH):
         raise RuntimeError(f"Model file not found: {MODEL_PATH}")
+    
     row = load_last_live_data_row()
     to_drop_cols = ["BTC_vol_target", "ETH_vol_target", "SOL_vol_target"]
     features = row.drop(columns=to_drop_cols, errors="ignore")
     nan_cols = features.columns[features.isna().any()].tolist()
+
     if nan_cols:
         logger.warning("Feature columns with NaN values (filling with 0): %s", nan_cols)
+
     features = features.fillna(0)
     xgb = pickle.load(open(MODEL_PATH, "rb"))
+
     if hasattr(xgb, "feature_names_in_"):
         features = features[xgb.feature_names_in_]
     elif hasattr(xgb, "feature_name_"):
         features = features[xgb.feature_name_]
+
     _, xgb_high = xgb.predict_proba(features)[0]
     current_threshold = load_threshold_from_json()
     signal = 1 if xgb_high >= current_threshold else 0
+
     return {
         "prediction": "high" if signal == 1 else "low",
         "prob_high": xgb_high,
@@ -128,6 +139,7 @@ def compute_prediction() -> dict:
 
 def run_prediction() -> dict:
     result = compute_prediction()
+
     pred_row = pd.DataFrame([{
         "timestamp": result["timestamp"],
         "prediction": result["prediction"],
@@ -140,12 +152,16 @@ def run_prediction() -> dict:
 
 def _load_live_data(limit: int | None = None) -> pd.DataFrame:
     df = safe_read_csv(LIVE_DATA_PATH, index_col=0)
+
     if df.empty:
         raise FileNotFoundError("live_data.csv not found or is empty")
+    
     df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
     df = df.sort_index()
+
     if limit is not None:
         return df.tail(limit)
+    
     return df
 
 def backfill_vol_targets() -> None:
@@ -153,25 +169,12 @@ def backfill_vol_targets() -> None:
     if df.empty:
         return
 
-    df["BTC_vol_target"] = pd.cut(
-        df["BTC-USD_volatility"],
-        bins=[-np.inf, 0.00638, 0.01069, np.inf],
-        labels=[0, 1, 2]
-    ).shift(-1)
-
-    df["ETH_vol_target"] = pd.cut(
-        df["ETH-USD_volatility"],
-        bins=[-np.inf, 0.00867, 0.01427, np.inf],
-        labels=[0, 1, 2]
-    ).shift(-1)
-
-    df["SOL_vol_target"] = pd.cut(
-        df["SOL-USD_volatility"],
-        bins=[-np.inf, 0.01205, 0.01960, np.inf],
-        labels=[0, 1, 2]
-    ).shift(-1)
+    df["BTC_vol_target"] = (df["BTC-USD_volatility"] > 0.01069).astype(int).shift(-1)
+    df["ETH_vol_target"] = (df["ETH-USD_volatility"] > 0.01427).astype(int).shift(-1)
+    df["SOL_vol_target"] = (df["SOL-USD_volatility"] > 0.01960).astype(int).shift(-1)
+    
     df.to_csv(LIVE_DATA_PATH)
-    logger.info("[backfill] vol targets updated")
+    logger.info("[backfill] binary vol targets updated")
 
 def load_btc_price_series(limit: int) -> pd.DataFrame:
     return _load_live_data(limit)
@@ -185,35 +188,40 @@ def get_performance_metrics():
     live_df = safe_read_csv(LIVE_DATA_PATH, index_col=0)
     if preds_df.empty or live_df.empty:
         return {"msg": "No historical tracking data available yet."}
+        
     live_df.index = pd.to_datetime(live_df.index, utc=True, errors="coerce")
     preds_df["timestamp"] = pd.to_datetime(preds_df["timestamp"], utc=True)
+    
     now = datetime.now(timezone.utc)
     live_df = live_df[live_df.index + pd.Timedelta(hours=1) <= now]
     live_df = live_df.dropna(subset=["BTC_vol_target"])
     if live_df.empty:
         return {"msg": "Waiting for ground-truth data to finalize."}
-    live_df["true_target"] = (live_df["BTC_vol_target"].astype(float) == 2.0).astype(int)
+
+    live_df["true_target"] = live_df["BTC_vol_target"].astype(int)
+    
     merged = pd.merge(preds_df, live_df[["true_target"]], left_on="timestamp", right_index=True, how="inner")
     if merged.empty:
         return {"msg": "Waiting for ground-truth data to finalize."}
+        
     preds = merged["signal_triggered"].astype(int)
     trues = merged["true_target"].astype(int)
+    
     tp = int(((preds == 1) & (trues == 1)).sum())
     fp = int(((preds == 1) & (trues == 0)).sum())
     tn = int(((preds == 0) & (trues == 0)).sum())
     fn = int(((preds == 0) & (trues == 1)).sum())
+    
     total_tracked = tp + fp + tn + fn
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
     accuracy = (tp + tn) / total_tracked if total_tracked > 0 else 0.0
+    
     return {
         "status": "success",
         "total_tracked": total_tracked,
-        "tp": tp,
-        "fp": fp,
-        "tn": tn,
-        "fn": fn,
+        "tp": tp, "fp": fp, "tn": tn, "fn": fn,
         "precision": float(precision),
         "recall": float(recall),
         "f1": float(f1),
@@ -288,11 +296,14 @@ def live_sentiment(limit: int = Query(24, ge=1, le=24)):
 def predictions(limit: int = Query(24, ge=1, le=168)):
     try:
         preds_df = safe_read_csv(PREDICTIONS)
+
         if preds_df.empty:
             return {"status": "no_data", "msg": "No predictions yet.", "history": []}
+        
         preds_df["timestamp"] = pd.to_datetime(preds_df["timestamp"], utc=True)
         preds_df = preds_df.sort_values("timestamp").tail(limit)
         history = []
+
         for _, row in preds_df.iterrows():
             history.append({
                 "timestamp": row["timestamp"].isoformat(),
@@ -309,9 +320,12 @@ async def scheduler():
     while True:
         now = datetime.now(timezone.utc)
         next_run = now.replace(minute=4, second=10, microsecond=0)
+
         if next_run <= now:
             next_run += timedelta(hours=1)
+
         await asyncio.sleep((next_run - now).total_seconds())
+        
         try:
             backfill_vol_targets()
             run_prediction()
