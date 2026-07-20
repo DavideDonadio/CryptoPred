@@ -228,6 +228,50 @@ def get_performance_metrics():
         "accuracy": float(accuracy),
     }
 
+@app.get("/api/historical-audit")
+def get_historical_audit(limit: int = Query(400, ge=24, le=1000)):
+    try:
+        preds_df = safe_read_csv(PREDICTIONS)
+        live_df = safe_read_csv(LIVE_DATA_PATH, index_col=0)
+        
+        if preds_df.empty or live_df.empty:
+            return {"status": "no_data", "history": []}
+            
+        preds_df["timestamp"] = pd.to_datetime(preds_df["timestamp"], utc=True)
+        live_df.index = pd.to_datetime(live_df.index, utc=True, errors="coerce")
+        
+        preds_df = preds_df.sort_values("timestamp").tail(limit)
+        
+        price_map = live_df["BTC-USD_close"].to_dict()
+        vol_map = live_df["BTC-USD_volatility"].to_dict()
+        
+        history = []
+        for _, row in preds_df.iterrows():
+            ts = row["timestamp"]
+
+            close_price = price_map.get(ts, None)
+            current_vol = vol_map.get(ts, None)
+            
+            is_spike = 0
+            if current_vol is not None:
+                is_spike = 1 if float(current_vol) > 0.01069 else 0
+            
+            history.append({
+                "timestamp": ts.isoformat(),
+                "price": float(close_price) if close_price is not None else None,
+                "volatility_pct": round(float(current_vol) * 100, 3) if current_vol is not None else None,
+                "prob_high": round(float(row["prob_high"]), 4),
+                "threshold": round(float(row["threshold_used"]), 4),
+                "signal_triggered": int(row["signal_triggered"]),
+                "isSpike": is_spike
+            })
+            
+        return {"status": "success", "total_points": len(history), "history": history}
+        
+    except Exception as e:
+        logger.error("Historical audit generation failed: %s", e)
+        return {"status": "error", "msg": "Failed to compile historical audit data.", "history": []}
+
 @app.get("/api/btc-price")
 def btc_price(limit: int = Query(24, ge=1, le=720)):
     try:
