@@ -2,7 +2,9 @@
 
 CryptoPred is an automated end-to-end machine learning pipeline and FastAPI application that predicts next-hour cryptocurrency volatility spikes by fusing real-time social media sentiment (Reddit) with live market data (Binance).
 
-> 💡 **Detailed Methodology & Notebook:** For full cross-validation breakdowns, multi-class vs. binary trade-off analyses, hyperparameter tuning, threshold calibration, and regime-dependent limitations, please refer to the [`summary.ipynb`](./summary.ipynb) notebook.
+## 🔎 Detailed Methodology and Analysis
+
+For full cross-validation breakdowns, multi-class vs. binary trade-off analyses, hyperparameter tuning, threshold calibration, and regime-dependent limitations, please refer to the [`summary.ipynb`](./summary.ipynb) notebook.
 
 ---
 
@@ -40,8 +42,8 @@ docker build -t ghcr.io/davidedonadio/cryptopred:latest API_App/
 
 ### Automation & Scheduling
 Once running, the container manages continuous hourly inference:
-* **`cron`**: Triggers `pipeline.sh` at the top of each hour to scrape new Reddit data and construct updated features.
-* **`uvicorn`**: Serves refreshed predictions and rolling performance diagnostics via FastAPI at minute `:04` past each hour.
+* **`cron`**: Triggers `pipeline.sh` at the top of each hour to scrape Reddit data and construct updated features.
+* **`uvicorn`**: Serves predictions and rolling performance diagnostics via FastAPI at minute `:04` past each hour.
 
 ---
 
