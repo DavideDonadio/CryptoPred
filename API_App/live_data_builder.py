@@ -69,10 +69,6 @@ def generate_financial_columns(group):
 
     return pd.Series({
         "total_post_count": post_count,
-        "BTC_post_count": btc_count,
-        "ETH_post_count": eth_count,
-        "SOL_post_count": sol_count,
-        "GEN_post_count": gen_count,
         "BTC_bullish_ratio": bullish_btc / post_count if post_count else 0,
         "ETH_bullish_ratio": bullish_eth / post_count if post_count else 0,
         "SOL_bullish_ratio": bullish_sol / post_count if post_count else 0,
