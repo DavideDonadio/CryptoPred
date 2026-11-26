@@ -5,6 +5,7 @@ import os
 import json
 import pickle
 import logging
+import tempfile
 import numpy as np
 import pandas as pd
 import asyncio
@@ -41,7 +42,8 @@ def backfill_predictions() -> None:
             return
         
         df.index = pd.to_datetime(df.index, utc=True)
-        model = pickle.load(open(MODEL_PATH, "rb"))
+        with open(MODEL_PATH, "rb") as f:
+            model = pickle.load(f)
         threshold = load_threshold_from_json()
 
         to_drop = ["BTC_vol_target", "ETH_vol_target", "SOL_vol_target"]
@@ -54,7 +56,7 @@ def backfill_predictions() -> None:
         rows = []
 
         for i, idx in enumerate(df.index):
-            high = probs[i][1]
+            high = float(probs[i][1])
             pred = "high" if high >= threshold else "low"
             signal = 1 if high >= threshold else 0
             rows.append({
@@ -65,7 +67,7 @@ def backfill_predictions() -> None:
                 "threshold_used": threshold,
             })
             
-        pd.DataFrame(rows).to_csv(PREDICTIONS, index=False, date_format="%Y-%m-%d %H:%M:%S%z")
+        atomic_to_csv(pd.DataFrame(rows), PREDICTIONS, index=False, date_format="%Y-%m-%d %H:%M:%S%z")
         logger.info("[backfill] generated %d predictions", len(rows))
     except Exception as e:
         logger.error("[backfill] failed: %s", e)
@@ -85,6 +87,19 @@ def load_threshold_from_json() -> float:
         logger.warning("Could not parse %s. Using default %.2f.", THRESHOLDS_JSON, default)
         return default
 
+def atomic_to_csv(df: pd.DataFrame, path: str, **kwargs) -> None:
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=parent, prefix=".tmp_", suffix=".csv")
+    os.close(fd)
+    try:
+        df.to_csv(tmp_path, **kwargs)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
 def safe_read_csv(path: str, **kwargs) -> pd.DataFrame:
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         return pd.DataFrame()
@@ -96,14 +111,15 @@ def safe_read_csv(path: str, **kwargs) -> pd.DataFrame:
 def write_prediction(pred_row: pd.DataFrame) -> None:
     df = safe_read_csv(PREDICTIONS)
     if df.empty or "timestamp" not in df.columns:
-        pred_row.to_csv(PREDICTIONS, index=False, date_format="%Y-%m-%d %H:%M:%S%z")
+        atomic_to_csv(pred_row, PREDICTIONS, index=False, date_format="%Y-%m-%d %H:%M:%S%z")
         return
     
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     new_ts = pd.to_datetime(pred_row["timestamp"].iloc[0], utc=True)
     
     if not (df["timestamp"] == new_ts).any():
-        pred_row.to_csv(PREDICTIONS, mode="a", header=False, index=False, date_format="%Y-%m-%d %H:%M:%S%z")
+        combined = pd.concat([df, pred_row], ignore_index=True)
+        atomic_to_csv(combined, PREDICTIONS, index=False, date_format="%Y-%m-%d %H:%M:%S%z")
 
 def compute_prediction() -> dict:
     if not os.path.exists(MODEL_PATH):
@@ -118,7 +134,8 @@ def compute_prediction() -> dict:
         logger.warning("Feature columns with NaN values (filling with 0): %s", nan_cols)
 
     features = features.fillna(0)
-    xgb = pickle.load(open(MODEL_PATH, "rb"))
+    with open(MODEL_PATH, "rb") as f:
+        xgb = pickle.load(f)
 
     if hasattr(xgb, "feature_names_in_"):
         features = features[xgb.feature_names_in_]
@@ -126,6 +143,7 @@ def compute_prediction() -> dict:
         features = features[xgb.feature_name_]
 
     _, xgb_high = xgb.predict_proba(features)[0]
+    xgb_high = float(xgb_high)
     current_threshold = load_threshold_from_json()
     signal = 1 if xgb_high >= current_threshold else 0
 
@@ -169,11 +187,15 @@ def backfill_vol_targets() -> None:
     if df.empty:
         return
 
+    df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+    df = df[df.index.notna()].sort_index()
+    df.index.name = "index"
+
     df["BTC_vol_target"] = (df["BTC-USD_volatility"] > 0.01069).astype(int).shift(-1)
     df["ETH_vol_target"] = (df["ETH-USD_volatility"] > 0.01427).astype(int).shift(-1)
     df["SOL_vol_target"] = (df["SOL-USD_volatility"] > 0.01960).astype(int).shift(-1)
     
-    df.to_csv(LIVE_DATA_PATH)
+    atomic_to_csv(df, LIVE_DATA_PATH)
     logger.info("[backfill] binary vol targets updated")
 
 def load_btc_price_series(limit: int) -> pd.DataFrame:
@@ -248,18 +270,19 @@ def get_historical_audit(limit: int = Query(400, ge=24, le=1000)):
         history = []
         for _, row in preds_df.iterrows():
             ts = row["timestamp"]
+            target_ts = ts + pd.Timedelta(hours=1)
 
-            close_price = price_map.get(ts, None)
-            current_vol = vol_map.get(ts, None)
-            
-            is_spike = 0
-            if current_vol is not None:
-                is_spike = 1 if float(current_vol) > 0.01069 else 0
+            close_price = price_map.get(target_ts, None)
+            current_vol = vol_map.get(target_ts, None)
+            has_price = pd.notna(close_price)
+            has_vol = pd.notna(current_vol)
+
+            is_spike = 1 if (has_vol and float(current_vol) > 0.01069) else 0
             
             history.append({
                 "timestamp": ts.isoformat(),
-                "price": float(close_price) if close_price is not None else None,
-                "volatility_pct": round(float(current_vol) * 100, 3) if current_vol is not None else None,
+                "price": float(close_price) if has_price else None,
+                "volatility_pct": round(float(current_vol) * 100, 3) if has_vol else None,
                 "prob_high": round(float(row["prob_high"]), 4),
                 "threshold": round(float(row["threshold_used"]), 4),
                 "signal_triggered": int(row["signal_triggered"]),
@@ -284,19 +307,20 @@ def btc_price(limit: int = Query(24, ge=1, le=720)):
                 signal_map[row["timestamp"] + pd.Timedelta(hours=1)] = int(row["signal_triggered"])
         return {
             "timestamps": [ts.isoformat() for ts in df.index],
-            "prices": [float(val) for val in df["BTC-USD_close"].tolist()],
-            "volatilities": [round(float(val) * 100, 3) for val in df["BTC-USD_volatility"].tolist()],
+            "prices": [float(val) if pd.notna(val) else None for val in df["BTC-USD_close"].tolist()],
+            "volatilities": [round(float(val) * 100, 3) if pd.notna(val) else None for val in df["BTC-USD_volatility"].tolist()],
             "signals": [signal_map.get(ts, None) for ts in df.index],
         }
     except (FileNotFoundError, KeyError):
         return {"timestamps": [], "prices": [], "volatilities": [], "signals": [], "msg": "No data available yet."}
 
 @app.get("/api/volatility")
-def volatility(limit: int = Query(1, ge=1, le=720)):
+def volatility():
     try:
         preds_df = safe_read_csv(PREDICTIONS)
         if not preds_df.empty:
-            latest = preds_df.iloc[-1]
+            preds_df["timestamp"] = pd.to_datetime(preds_df["timestamp"], utc=True)
+            latest = preds_df.sort_values("timestamp").iloc[-1]
             return {
                 "prediction": str(latest["prediction"]),
                 "prob_high": float(latest["prob_high"]),
@@ -323,14 +347,18 @@ def live_sentiment(limit: int = Query(24, ge=1, le=24)):
         df = _load_live_data(limit)
         history = []
         for idx, row in df.iterrows():
+            def _num(col, default=0.0):
+                val = row.get(col, default)
+                return float(val) if pd.notna(val) else default
+
             history.append({
                 "timestamp": idx.isoformat(),
-                "sentiment_score": round(float(row.get("BTC_sentiment_score", 0)), 4),
-                "bullish_ratio": round(float(row.get("BTC_bullish_ratio", 0)), 4),
-                "bearish_ratio": round(float(row.get("BTC_bearish_ratio", 0)), 4),
-                "delta_sentiment": round(float(row.get("BTC_delta_sentiment", 0)), 4),
-                "total_posts": int(row.get("total_post_count", 0)),
-                "volatility_pct": round(float(row.get("BTC-USD_volatility", 0)) * 100, 4),
+                "sentiment_score": round(_num("BTC_sentiment_score"), 4),
+                "bullish_ratio": round(_num("BTC_bullish_ratio"), 4),
+                "bearish_ratio": round(_num("BTC_bearish_ratio"), 4),
+                "delta_sentiment": round(_num("BTC_delta_sentiment"), 4),
+                "total_posts": int(_num("total_post_count", 0)),
+                "volatility_pct": round(_num("BTC-USD_volatility") * 100, 4),
             })
         return {"ticker": "BTC", "status": "success", "history": history}
     except (FileNotFoundError, KeyError):
