@@ -2,6 +2,7 @@ import os
 import time
 import re
 import pickle
+import tempfile
 import ccxt
 import numpy as np
 import pandas as pd
@@ -20,7 +21,7 @@ def clean_reddit_text(text):
 def prepare_market_data(df, ticker):
     df = df.rename(columns={"Close": f"{ticker}_close", "Volume": f"{ticker}_volume"})
     df[f"{ticker}_return"] = df[f"{ticker}_close"].pct_change()
-    df[f"{ticker}_volatility"] = (df["High"] - df["Low"]) / df["Open"]
+    df[f"{ticker}_volatility"] = (df["High"] - df["Low"]) / df["Open"].replace(0, np.nan)
     df[f"{ticker}_vol_log"] = np.log1p(df[f"{ticker}_volume"])
     return df[[f"{ticker}_close", f"{ticker}_return", f"{ticker}_volatility", f"{ticker}_vol_log"]]
 
@@ -69,6 +70,10 @@ def generate_financial_columns(group):
 
     return pd.Series({
         "total_post_count": post_count,
+        "BTC_post_count": btc_count,
+        "ETH_post_count": eth_count,
+        "SOL_post_count": sol_count,
+        "GEN_post_count": gen_count,
         "BTC_bullish_ratio": bullish_btc / post_count if post_count else 0,
         "ETH_bullish_ratio": bullish_eth / post_count if post_count else 0,
         "SOL_bullish_ratio": bullish_sol / post_count if post_count else 0,
@@ -156,7 +161,7 @@ def get_reddit_content(datasets, svm_model, start_dt=None):
     if not all_dfs:
         return pd.DataFrame(), start_dt
     
-    safe_start_boundary = max(subreddit_horizons).floor("h") if subreddit_horizons else start_dt
+    safe_start_boundary = min(subreddit_horizons).floor("h") if subreddit_horizons else start_dt
 
     final_df = pd.concat(all_dfs, ignore_index=True)
     return final_df.set_index("created").sort_index(), safe_start_boundary
@@ -183,7 +188,8 @@ def main():
     tickers = ['BTC-USD', 'ETH-USD', 'SOL-USD']
 
     svm_path = os.path.join(BASE_DIR, "data", "models", "svm.pkl")
-    svm_model = pickle.load(open(svm_path, "rb"))
+    with open(svm_path, "rb") as f:
+        svm_model = pickle.load(f)
 
     df_final, safe_start_boundary = get_reddit_content(subreddits, svm_model, start_dt=start_history)
     if df_final.empty:
@@ -249,19 +255,17 @@ def main():
 
     df_final.drop(columns=[f'{p}_polarity' for p in prefixes], inplace=True)
 
-    df_final['BTC_vol_target'] = pd.cut(df_final['BTC-USD_volatility'], bins=[-np.inf, 0.00638, 0.01069, np.inf], labels=[0, 1, 2])
-    df_final['SOL_vol_target'] = pd.cut(df_final['SOL-USD_volatility'], bins=[-np.inf, 0.01205, 0.01960, np.inf], labels=[0, 1, 2])
-    df_final['ETH_vol_target'] = pd.cut(df_final['ETH-USD_volatility'], bins=[-np.inf, 0.00867, 0.01427, np.inf], labels=[0, 1, 2])
-
-    df_final['BTC_vol_target'] = df_final['BTC_vol_target'].shift(-1)
-    df_final['SOL_vol_target'] = df_final['SOL_vol_target'].shift(-1)
-    df_final['ETH_vol_target'] = df_final['ETH_vol_target'].shift(-1)
+    df_final['BTC_vol_target'] = (df_final['BTC-USD_volatility'] > 0.01069).astype(int).shift(-1)
+    df_final['SOL_vol_target'] = (df_final['SOL-USD_volatility'] > 0.01960).astype(int).shift(-1)
+    df_final['ETH_vol_target'] = (df_final['ETH-USD_volatility'] > 0.01427).astype(int).shift(-1)
 
     df_final['post_volume_24h_avg'] = df_final['total_post_count'].rolling(window=24).mean()
     df_final['post_spike_ratio'] = df_final['total_post_count'] / (df_final['post_volume_24h_avg'] + 1)
 
-
-    df_final = df_final[df_final.index >= safe_start_boundary]
+    completed_hour = pd.Timestamp(now).floor("h") - pd.Timedelta(hours=1)
+    if safe_start_boundary is not None:
+        effective_start = min(pd.Timestamp(safe_start_boundary), completed_hour)
+        df_final = df_final[df_final.index >= effective_start]
 
     lag_cols = [f'{col}_lag_{lag}' for col in features_to_lag for lag in [1, 3, 6, 12]]
     df_final = df_final.dropna(subset=['post_volume_24h_avg'] + lag_cols)
@@ -270,7 +274,6 @@ def main():
         print("No complete rows after feature engineering, stopping.")
         return
 
-    completed_hour = pd.Timestamp(now).floor("h") - pd.Timedelta(hours=1)
     df_final = df_final[df_final.index <= completed_hour]
     print(f"Truncated to completed hour {completed_hour}: {len(df_final)} rows remain")
 
@@ -279,26 +282,41 @@ def main():
         return
 
     csv_path = os.path.join(BASE_DIR, "data", "clean_reddit", "live_data.csv")
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    csv_dir = os.path.dirname(csv_path)
+    os.makedirs(csv_dir, exist_ok=True)
     df_final.index.name = "index"
 
+    def write_csv_atomic(frame):
+        fd, tmp_path = tempfile.mkstemp(dir=csv_dir, prefix=".live_data_", suffix=".tmp")
+        os.close(fd)
+        try:
+            frame.to_csv(tmp_path, index=True)
+            os.replace(tmp_path, csv_path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
+
     if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
-        df_final.to_csv(csv_path, index=True)
+        write_csv_atomic(df_final)
         print(f"Created new CSV file with {len(df_final)} rows")
     else:
         try:
             existing = pd.read_csv(csv_path, index_col=0)
             existing.index = pd.to_datetime(existing.index, utc=True, errors="coerce")
-            latest_completed_row = df_final.iloc[[-1]].copy()
-            latest_ts = latest_completed_row.index[0]
+            existing = existing[existing.index.notna()]
+            new_rows = df_final[~df_final.index.isin(existing.index)]
 
-            if latest_ts in existing.index:
-                print(f"Latest hour {latest_ts} already exists, skipping append.")
+            if new_rows.empty:
+                print("No new completed hours to append, skipping.")
                 return
-            latest_completed_row.to_csv(csv_path, mode='a', header=False, index=True)
-            print("Successfully appended new hourly data.")
+
+            combined = pd.concat([existing, new_rows]).sort_index()
+            combined.index.name = "index"
+            write_csv_atomic(combined)
+            print(f"Successfully appended {len(new_rows)} new hourly row(s).")
         except pd.errors.EmptyDataError:
-            df_final.to_csv(csv_path, index=True)
+            write_csv_atomic(df_final)
             print("Overwrote empty file with fresh data.")
 
 if __name__ == "__main__":
