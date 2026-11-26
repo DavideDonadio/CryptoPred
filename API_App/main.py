@@ -602,22 +602,23 @@ def root() -> HTMLResponse:
             }
 
             const ctx = document.getElementById("probChart").getContext("2d");
+            const volSeries = realVols || Array(labels.length).fill(null);
             if (probChartInstance) {
                 probChartInstance.data.labels = labels;
                 probChartInstance.data.datasets[0].data = probs;
                 probChartInstance.data.datasets[1].data = Array(labels.length).fill(threshold);
-                if (realVols && probChartInstance.data.datasets[2]) {
-                    probChartInstance.data.datasets[2].data = realVols;
-                } else if (!realVols && probChartInstance.data.datasets[2]) {
-                    probChartInstance.data.datasets.splice(2, 1);
-                }
+                probChartInstance.data.datasets[2].data = volSeries;
+                probChartInstance.data.datasets[3].data = Array(labels.length).fill(1.069);
                 probChartInstance.update();
+                probStatus.textContent = "Loaded " + data.history.length + " predictions.";
                 return;
             }
 
             const datasets = [
                 { label: "P(High Vol.)", data: probs, borderColor: "#ff6b6b", backgroundColor: "rgba(255,107,107,0.08)", tension: 0.3, fill: true, pointRadius: 2, yAxisID: "y" },
                 { label: `Threshold (${(threshold*100).toFixed(1)}%)`, data: Array(labels.length).fill(threshold), borderColor: "rgba(255,255,255,0.25)", borderWidth: 1, borderDash: [4,4], pointRadius: 0, fill: false, yAxisID: "y" },
+                { label: "Real Volatility %", data: volSeries, borderColor: "#ff9f43", backgroundColor: "rgba(255,159,67,0.06)", tension: 0.3, borderWidth: 1.5, pointRadius: 1.5, yAxisID: "y1" },
+                { label: "High Vol. Threshold (1.069%)", data: Array(labels.length).fill(1.069), borderColor: "rgba(255,107,107,0.5)", borderWidth: 1, borderDash: [6,4], pointRadius: 0, fill: false, yAxisID: "y1" },
             ];
 
             const scales = {
@@ -625,21 +626,6 @@ def root() -> HTMLResponse:
                 y: { min: 0, max: 1, ticks: { color: "#ff6b6b", callback: v => (v*100).toFixed(0)+"%" }, grid: { color: "rgba(255,255,255,0.05)" }, title: { display: true, text: "Probability", color: "#ff6b6b" } },
                 y1: { type: "linear", display: true, position: "right", min: 0, ticks: { color: "#ff9f43", callback: v => v.toFixed(1)+"%" }, grid: { drawOnChartArea: false }, title: { display: true, text: "Volatility %", color: "#ff9f43" } },
             };
-
-            if (realVols) {
-                datasets.push({ label: "Real Volatility %", data: realVols, borderColor: "#ff9f43", backgroundColor: "rgba(255,159,67,0.06)", tension: 0.3, borderWidth: 1.5, pointRadius: 1.5, yAxisID: "y1" });
-            }
-
-            datasets.push({
-                label: "High Vol. Threshold (1.069%)",
-                data: Array(labels.length).fill(1.069),
-                borderColor: "rgba(255,107,107,0.5)",
-                borderWidth: 1,
-                borderDash: [6,4],
-                pointRadius: 0,
-                fill: false,
-                yAxisID: "y1",
-            });
 
             probChartInstance = new Chart(ctx, {
                 type: "line",
@@ -656,20 +642,22 @@ def root() -> HTMLResponse:
         function renderChart(payload) {
             const formattedLabels = payload.timestamps.map(formatTimestamp);
             const ctx = document.getElementById("btcChart").getContext("2d");
+            const hasVol = payload.volatilities && payload.volatilities.length > 0;
+            const hasSignals = payload.signals && payload.signals.length > 0;
+            const highPoints = hasSignals ? payload.prices.map((p,i) => payload.signals[i]===1 ? p : null) : [];
             
             if (chartInstance) {
                 chartInstance.data.labels = formattedLabels;
                 chartInstance.data.datasets[0].data = payload.prices;
-                if (payload.volatilities && chartInstance.data.datasets[1]) {
-                    chartInstance.data.datasets[1].data = payload.volatilities;
-                }
+                const volDs = chartInstance.data.datasets.find(d => d.label === "Volatility %");
+                if (volDs && hasVol) volDs.data = payload.volatilities;
+                const sigDs = chartInstance.data.datasets.find(d => d.label === "HIGH Prediction");
+                if (sigDs && hasSignals) sigDs.data = highPoints;
+                const thrDs = chartInstance.data.datasets.find(d => d.label.startsWith("High Vol. Threshold"));
+                if (thrDs) thrDs.data = Array(formattedLabels.length).fill(1.069);
                 chartInstance.update();
                 return;
             }
-
-            const hasVol = payload.volatilities && payload.volatilities.length > 0;
-            const hasSignals = payload.signals && payload.signals.length > 0;
-            const highPoints = hasSignals ? payload.prices.map((p,i) => payload.signals[i]===1 ? p : null) : [];
             
             const datasets = [
                 {
