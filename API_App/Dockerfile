@@ -5,18 +5,6 @@ WORKDIR /app
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
-# Install system deps needed for undetected-chromedriver
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
-    gnupg \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Chromium
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    chromium \
-    chromium-driver \
-    && rm -rf /var/lib/apt/lists/*
-
 # Copy dependency files
 COPY pyproject.toml uv.lock ./
 
@@ -66,7 +54,6 @@ RUN chmod +x pipeline.sh entrypoint.sh
 # Install crontab
 COPY crontab.txt /etc/cron.d/cryptopred
 RUN chmod 0644 /etc/cron.d/cryptopred && \
-    crontab /etc/cron.d/cryptopred && \
     touch /var/log/cron.log
 
 # Create log directory
